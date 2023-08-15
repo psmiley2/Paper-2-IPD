@@ -18,9 +18,9 @@ import pandas as pd
 
 plt.rcParams['animation.ffmpeg_path'] = 'C:\\Users\\pdsmi\\Desktop\\IPD\\ffmpeg-5.1.2-essentials_build\\bin\\ffmpeg.exe'
 
-# rows, cols = (30, 30)
+rows, cols = (30, 30)
 # rows, cols = (20, 20)
-rows, cols = (10, 10)
+# rows, cols = (10, 10)
 # rows, cols = (5, 5)
 # rows, cols = (3, 3)
 x_max, y_max = (500, 500)
@@ -52,11 +52,15 @@ class Agent(object):
     instances = []
     heterogeneity_per_round = []
     cooperability_per_round = []
-    individuality_per_round = []
     average_memory_length_per_round = []
     min_history_length_per_round = []
     max_history_length_per_round = []
     max_history_length = 5
+    individuality_per_round = {}
+    should_calculate_heterogeneity = False
+    should_calculate_individuality = False
+    for i in range(1, max_history_length + 1):
+        individuality_per_round[i] = []
 
     @classmethod
     def populate(cls):
@@ -145,7 +149,7 @@ class Agent(object):
             if lowest:
                 a.num_times_mutated_in_a_row += 1
                 if a.num_times_mutated_in_a_row == 3:
-                    print("GETTING COPIED")
+                    # print("GETTING COPIED")
                     best_neighbor = a
                     for n in list(a.neighbors):
                         if n.health_gained_this_round > best_neighbor.health_gained_this_round:
@@ -163,13 +167,13 @@ class Agent(object):
                 else:
                     for key in a.policy_table.keys():
                         if np.random.random() < .2:  # 20% mutation rate
-                            print("MUTATING")
+                            # print("MUTATING")
                             a.policy_table[key] = np.random.choice(["d", "c"])
                             
                             memory_length_mutation = np.random.random()
                             if memory_length_mutation <= .25:
                                 if a.history_length < Agent.max_history_length:
-                                    print("history length increasing")
+                                    # print("history length increasing")
                                     for history_list in a.history.values():
                                         history_list.insert(0, '0') # insert unknown history at the beginning
                                     
@@ -182,7 +186,7 @@ class Agent(object):
                             elif memory_length_mutation <= .5:
                                 if a.history_length > 1:
                                     a.history_length -= 1
-                                    print("history length decreasing")
+                                    # print("history length decreasing")
                                     new_policy_table = {}
                                     for k, v in a.policy_table.items():
                                         new_key = k[1:]
@@ -305,14 +309,7 @@ class Agent(object):
 
         
         for i in range(opp.history_length - 1):
-            print(opp.history_length)
-            try:
-                opp.history[self][i] = opp.history[self][i + 1]
-            except:
-                print(opp.policy_table)
-                print(opp.history)
-                print("here")
-                quit()
+            opp.history[self][i] = opp.history[self][i + 1]
         opp.history[self][-1] = my_policy
 
         return (my_policy, my_inc, opp_policy, opp_inc)
@@ -521,7 +518,7 @@ class Animate:
         pass
 
     def animate(self, step):
-        print(step)
+        # print(step)
         for p in self.ax.patches:
             p.remove()
 
@@ -574,10 +571,13 @@ class Animate:
             self.current_neighbor_num = 0
             if self.current_agent_num == len(self.agents):
                 # New Round
-                self.calculate_individuality()
-                Agent.mutate_population()
-                if self.current_round % 1 == 0:
-                    Agent.calculate_heterogeneity()
+                print("Current round: ", self.current_round)
+                if Agent.should_calculate_individuality:
+                    self.calculate_individuality()
+                    Agent.mutate_population()
+                if Agent.should_calculate_heterogeneity:
+                    if self.current_round % 1 == 0:
+                        Agent.calculate_heterogeneity()
 
                 max_history_length = 1 
                 min_history_length = Agent.max_history_length
@@ -769,6 +769,16 @@ class Animate:
             phenotype_value = 2 * (cooperate_counter /
                                    (cooperate_counter + defect_counter))
             data_points.append([a.row, a.col, phenotype_value])
+        
+        # max = data_points[0][2]
+        # min = data_points[0][2]
+        # for dp in data_points:
+        #     if dp[2] < min:
+        #         min = dp[2]
+        #     if dp[2] > max:
+        #         max = dp[2]
+        # print(min)
+        # print(max)
 
         clustering = DBSCAN(eps=1.05, min_samples=2).fit(data_points)
         colors = {-1: "black"}
@@ -789,6 +799,43 @@ class Animate:
         plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
                     "Phenotype_DBScan_Color_Map" + str(self.current_round)))
         plt.clf()
+
+
+    def general_DBScan_info(self, version="random"):
+        self.fig, self.ax = plt.subplots()
+        self.ax.set_xlim(0, x_max)
+        self.ax.set_ylim(0, y_max)
+        self.ax.get_xaxis().set_visible(False)
+        self.ax.get_yaxis().set_visible(False)
+        self.ax.set_title("Phenotype DBScan Map")
+
+        data_points = []
+        for a in Agent.instances:
+            data_points.append([a.row, a.col, random.random() * 2])
+
+        clustering = DBSCAN(eps=1.05, min_samples=2).fit(data_points)
+        colors = {-1: "black"}
+        for i, a in enumerate(Agent.instances):
+            label = clustering.labels_[i]
+            if version == "all_islands":
+                label = -1 # for all islands
+            elif version == "all_same":
+                label = 0 # for all the same
+            color = ""
+            if label in colors:
+                color = colors[label]
+            else:
+                colors[label] = "#"+''.join([random.choice('0123456789ABCDEF') for i in range(6)])
+                color = colors[label]
+
+            p = Polygon(a.corners(), facecolor=color, linewidth=0)
+
+            self.ax.add_patch(p)
+
+        # plt.show()
+        plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
+                    "General_DBScan_Color_Map" + str(self.current_round)))
+ 
 
     def individuality_color_map(self, include_first_encounters=False):
         self.fig, self.ax = plt.subplots()
@@ -1047,22 +1094,29 @@ class Animate:
         plt.clf()
 
     def individuality_plot(self):
-        plt.plot(Agent.individuality_per_round, label="individuality")
-        plt.plot([1] * len(Agent.individuality_per_round))
+        for hl, individuality_per_round_lists in Agent.individuality_per_round.items():
+            averages = [np.average(sub_list) for sub_list in individuality_per_round_lists]
+            print(hl, averages)
+            plt.plot(averages, label="History length: " + str(hl))
+
+        # plt.plot([1] * len(Agent.individuality_per_round))
 
         self.ax = plt.gca()
         self.ax.set_xlim(left=5)
         self.ax.set(xlabel='Round', ylabel='Individuality',
                     title="Individuality Over Time")
         self.ax.grid(True)
-        self.ax.legend(["Population's Average Individuality", "Max"])
+        # self.ax.legend(["Population's Average Individuality", "Max"])
+        self.ax.legend()
         plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
                     "Individuality Plot" + str(self.current_round)))
         plt.clf()
         plt.close('all')
 
     def calculate_individuality(self, include_first_encounters=False):
-        individuality = []
+        individuality_by_history_length = {}
+        for i in range(1, Agent.max_history_length + 1):
+            individuality_by_history_length[i] = []
         unique_genomes = {}
         copied_agents = copy.deepcopy(Agent.instances)
         for a in copied_agents:
@@ -1103,10 +1157,12 @@ class Animate:
             except:
                 continue
 
-            individuality.append(abs(genotype_ratio - phenotype_ratio))
-        Agent.individuality_per_round.append(np.average(individuality))
+            individuality_by_history_length[a.history_length].append(abs(genotype_ratio - phenotype_ratio))
 
-    
+        for i in range(1, Agent.max_history_length + 1):
+            Agent.individuality_per_round[i].append(individuality_by_history_length[i])
+
+
     def memory_lengths_over_time(self):
         plt.plot(Agent.average_memory_length_per_round)
         plt.plot(Agent.max_history_length_per_round)
@@ -1125,24 +1181,30 @@ class Animate:
         plt.close('all')
 
 
-
-
     def plot(self):
-        # self.plot_all_healths()
-        # self.plot_cooperability_ratio_graph()
+        self.plot_all_healths()
         # self.print_policy_tables()
         # self.print_heterogeneity_per_round()
-        # self.genotype_color_map()
-        # self.phenotype_color_map()
-        # self.individuality_color_map() # difference between genotype and phenotype
-        # self.memory_color_map()
-        # self.plot_relative_health()
-        # self.plot_max_min_avg()
-        # self.plot_correlations() # BUG: Fail to allocate bitmap issue has something to do with this or individuality plot
+        self.genotype_color_map()
+        self.phenotype_color_map()
+        self.individuality_color_map() # difference between genotype and phenotype
+        self.memory_color_map()
+        self.plot_relative_health()
+        self.plot_max_min_avg()
+        self.plot_correlations() # BUG: Fail to allocate bitmap issue has something to do with this or individuality plot
+        
+        # Grouped:
+        # Agent.should_calculate_individuality = True
         # self.individuality_plot()
-        # self.phenotype_DBScan()
-        # self.relative_health_DBScan()
+
+        # Grouped:
+        # Agent.should_calculate_heterogeneity = True
+        # self.plot_cooperability_ratio_graph()
+        
+        self.phenotype_DBScan()
+        self.relative_health_DBScan()
         self.memory_lengths_over_time()
+        self.general_DBScan_info(version="all_islands")
         pass
 
 
@@ -1188,8 +1250,8 @@ if __name__ == '__main__':
     anim.path = "data_" + str(path_number) + "_" + str(date.today())
     os.makedirs(anim.path)
 
-    anim.generations_to_plot = [1, 50, 100, 150, 200,
-                                250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 800, 900, 1000, 1100, 1200, 1300]
+    anim.generations_to_plot = [2, 50, 100, 150, 200,
+                                250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 800, 900, 1000, 1100, 1200, 1300, 2000, 3000, 4000, 5000]
     for generation in anim.generations_to_plot:
         os.makedirs(os.path.join(anim.path, "generation_" + str(generation)))
 
