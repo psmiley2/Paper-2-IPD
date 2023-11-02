@@ -15,11 +15,17 @@ import copy
 import collections
 from matplotlib.colors import LinearSegmentedColormap
 import pandas as pd
+import hyperparameters as hp
+import globals
+
+
+sys.setrecursionlimit(5000)
 
 plt.rcParams['animation.ffmpeg_path'] = 'C:\\Users\\pdsmi\\Desktop\\IPD\\ffmpeg-5.1.2-essentials_build\\bin\\ffmpeg.exe'
 
-rows, cols = (30, 30)
+# rows, cols = (30, 30)
 # rows, cols = (20, 20)
+rows, cols = (hp.ROWS, hp.COLS)
 # rows, cols = (10, 10)
 # rows, cols = (5, 5)
 # rows, cols = (3, 3)
@@ -53,14 +59,31 @@ class Agent(object):
     heterogeneity_per_round = []
     cooperability_per_round = []
     average_memory_length_per_round = []
-    min_history_length_per_round = []
-    max_history_length_per_round = []
-    max_history_length = 5
+    min_memory_length_per_round = []
+    max_memory_length_per_round = []
+    single_memory_strategy_info = {"TfT": {"counts": [], "avg_scores": []}, 
+                                   "AC": {"counts": [], "avg_scores": []}, 
+                                   "AD": {"counts": [], "avg_scores": []}, 
+                                   "X": {"counts": [], "avg_scores": []}}
     individuality_per_round = {}
-    should_calculate_heterogeneity = False
-    should_calculate_individuality = False
-    for i in range(1, max_history_length + 1):
+    for i in range(1, hp.MAX_MEMORY_LENGTH + 1):
         individuality_per_round[i] = []
+
+    @classmethod
+    def reset(cls):
+        Agent.instances = []
+        Agent.heterogeneity_per_round = []
+        Agent.cooperability_per_round = []
+        Agent.average_memory_length_per_round = []
+        Agent.min_memory_length_per_round = []
+        Agent.max_memory_length_per_round = []
+        Agent.single_memory_strategy_info = {"TfT": {"counts": [], "avg_scores": []}, 
+                                               "AC": {"counts": [], "avg_scores": []}, 
+                                               "AD": {"counts": [], "avg_scores": []}, 
+                                               "X": {"counts": [], "avg_scores": []}}
+        Agent.individuality_per_round = {}
+        for i in range(1, hp.MAX_MEMORY_LENGTH + 1):
+            Agent.individuality_per_round[i] = []
 
     @classmethod
     def populate(cls):
@@ -137,6 +160,7 @@ class Agent(object):
         else:
             Agent.cooperability_per_round.append(
                 num_cooperates / (num_cooperates + num_defects))
+    
 
     @classmethod
     def mutate_population(cls):
@@ -148,56 +172,54 @@ class Agent(object):
                     break
             if lowest:
                 a.num_times_mutated_in_a_row += 1
-                if a.num_times_mutated_in_a_row == 3:
+                if a.num_times_mutated_in_a_row == hp.NUM_TIMES_AGENT_MUTATED_IN_A_ROW_CAP:
                     # print("GETTING COPIED")
                     best_neighbor = a
                     for n in list(a.neighbors):
                         if n.health_gained_this_round > best_neighbor.health_gained_this_round:
                             best_neighbor = n
                     a.policy_table = copy.deepcopy(best_neighbor.policy_table)
-                    if a.history_length > best_neighbor.history_length:
-                        diff = a.history_length - best_neighbor.history_length
-                        for k, v in a.history.items():
-                            a.history[k] = v[diff:]
-                    elif a.history_length < best_neighbor.history_length:
-                        diff = best_neighbor.history_length - a.history_length
-                        for k, v in a.history.items():
-                            a.history[k] = diff * ['0'] + v
-                    a.history_length = best_neighbor.history_length
+                    if a.memory_length > best_neighbor.memory_length:
+                        diff = a.memory_length - best_neighbor.memory_length
+                        for k, v in a.memory.items():
+                            a.memory[k] = v[diff:]
+                    elif a.memory_length < best_neighbor.memory_length:
+                        diff = best_neighbor.memory_length - a.memory_length
+                        for k, v in a.memory.items():
+                            a.memory[k] = diff * ['0'] + v
+                    a.memory_length = best_neighbor.memory_length
                 else:
                     for key in a.policy_table.keys():
-                        if np.random.random() < .2:  # 20% mutation rate
+                        if np.random.random() < hp.GENOME_MUTATION_RATE:  # mutation rate
                             # print("MUTATING")
                             a.policy_table[key] = np.random.choice(["d", "c"])
-                            
-                            memory_length_mutation = np.random.random()
-                            if memory_length_mutation <= .25:
-                                if a.history_length < Agent.max_history_length:
-                                    # print("history length increasing")
-                                    for history_list in a.history.values():
-                                        history_list.insert(0, '0') # insert unknown history at the beginning
-                                    
-                                    a.history_length += 1
-                                    new_policy_table = {}
-                                    for k, v in a.policy_table.items():
-                                        new_policy_table["c" + k] = v
-                                        new_policy_table["d" + k] = v
-                                    
-                            elif memory_length_mutation <= .5:
-                                if a.history_length > 1:
-                                    a.history_length -= 1
-                                    # print("history length decreasing")
-                                    new_policy_table = {}
-                                    for k, v in a.policy_table.items():
-                                        new_key = k[1:]
-                                        if new_key in new_policy_table:
-                                            if new_policy_table[new_key] == v:
-                                                continue
-                                            else:
-                                                new_policy_table[new_key] = random.choice([v, new_policy_table[new_key]])
+                    if hp.MEMORY_LENGTH_CAN_EVOLVE:        
+                        memory_length_mutation = np.random.random()
+                        if memory_length_mutation <= hp.MEMORY_LENGTH_INCREASE_MUTATION_RATE:
+                            if a.memory_length < hp.MAX_MEMORY_LENGTH:
+                                # print("memory length increasing")
+                                for memory_list in a.memory.values():
+                                    memory_list.insert(0, '0') # insert unknown memory at the beginning
+                                
+                                a.memory_length += 1
+                                new_policy_table = {}
+                                for k, v in a.policy_table.items():
+                                    new_policy_table["c" + k] = v
+                                    new_policy_table["d" + k] = v
+                        elif memory_length_mutation <= hp.MEMORY_LENGTH_DECREASE_MUTATION_RATE + hp.MEMORY_LENGTH_INCREASE_MUTATION_RATE:
+                            if a.memory_length > 1:
+                                a.memory_length -= 1
+                                # print("memory length decreasing")
+                                new_policy_table = {}
+                                for k, v in a.policy_table.items():
+                                    new_key = k[1:]
+                                    if new_key in new_policy_table:
+                                        if new_policy_table[new_key] == v:
+                                            continue
                                         else:
-                                            new_policy_table[new_key] = v
-                            # 50 % chance of no change in memory length
+                                            new_policy_table[new_key] = random.choice([v, new_policy_table[new_key]])
+                                    else:
+                                        new_policy_table[new_key] = v
             else:
                 a.num_times_mutated_in_a_row = 0
  
@@ -206,17 +228,20 @@ class Agent(object):
         self.super_agent = None
         self.row = row
         self.col = col
-        self.history_length = np.random.randint(
-            1, Agent.max_history_length + 1)
         self.policy_table = {}
         self.neighbors = set()
         self.health = 0
         self.health_gained_this_round = 0
         self.health_data = []
         self.num_times_mutated_in_a_row = 0
-        self.history = {}  # key = agent ID, value = array of past moves
-        self.phenotype_history = []
+        self.memory = {}  # key = agent ID, value = array of past moves
+        self.phenotype_memory = []
 
+        self.memory_length = hp.STARTING_MEMORY_LENGTH
+        if self.memory_length == -1:
+            self.memory_length = np.random.randint(
+                1, hp.MAX_MEMORY_LENGTH + 1)
+            
     def get_neighbors(self, force=False):
         if self.super_agent and not force:
             return self.super_agent.get_neighbors()
@@ -242,11 +267,10 @@ class Agent(object):
             sw = new_sw
         return ranked_strategies
 
-    def get_policy_output(self, opp_history):
-        policy_key = "".join(opp_history)
+    def get_policy_output(self, opp_memory):
+        policy_key = "".join(opp_memory)
         if policy_key not in self.policy_table:
-            # TODO: If policy is 'merge', we are going to need a backup policy
-            self.policy_table[policy_key] = np.random.choice(["c", "d"])
+            self.policy_table[policy_key] = np.random.choice(["m", "c", "d"])
 
         return self.policy_table[policy_key]
 
@@ -267,50 +291,56 @@ class Agent(object):
             return self.play_against(opp.super_agent)
         # Else play as below:
 
-        if opp not in self.history:
-            self.history[opp] = ['0'] * self.history_length
-        if self not in opp.history:
-            opp.history[self] = ['0'] * opp.history_length
+        if opp not in self.memory:
+            self.memory[opp] = ['0'] * self.memory_length
+        if self not in opp.memory:
+            opp.memory[self] = ['0'] * opp.memory_length
 
-        my_policy = self.get_policy_output(self.history[opp])
-        opp_policy = opp.get_policy_output(opp.history[self])
-        # if my_ranked_strats[0] == 'merge' and opp_ranked_strats[0] == 'merge':
-        #     self.merge_with(opp)
-        # For now, remove 'merge's
-        if my_policy == 'merge' and opp_policy == 'merge':
-            my_inc = 0
-            opp_inc = 0
+        my_policy = self.get_policy_output(self.memory[opp])
+        opp_policy = opp.get_policy_output(opp.memory[self])
+        if my_policy == 'm' and opp_policy == 'm':
+            my_inc = hp.MERGE_AGAINST_MERGE_POINTS
+            opp_inc = hp.MERGE_AGAINST_MERGE_POINTS
             self.merge_with(opp)
+        elif my_policy == 'm' and opp_policy == 'c':
+            my_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
+            opp_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
+        elif my_policy == 'c' and opp_policy == 'm':
+            my_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
+            opp_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
+        elif my_policy == 'd' and opp_policy == 'm':
+            my_inc = hp.DEFECT_AGAINST_COOPERATE_POINTS
+            opp_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
+        elif my_policy == 'm' and opp_policy == 'd':
+            my_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
+            opp_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
         elif my_policy == 'c' and opp_policy == 'c':
-            my_inc = 8
-            opp_inc = 8
+            my_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
+            opp_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
         elif my_policy == 'c' and opp_policy == 'd':
-            my_inc = 0
-            opp_inc = 10
+            my_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
+            opp_inc = hp.DEFECT_AGAINST_COOPERATE_POINTS
         elif my_policy == 'd' and opp_policy == 'c':
-            my_inc = 10
-            opp_inc = 0
+            my_inc = hp.DEFECT_AGAINST_COOPERATE_POINTS
+            opp_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
         elif my_policy == 'd' and opp_policy == 'd':
-            my_inc = 5
-            opp_inc = 5
+            my_inc = hp.DEFECT_AGAINST_DEFECT_POINTS
+            opp_inc = hp.DEFECT_AGAINST_DEFECT_POINTS
         else:
-            # The only reason we should be here is if both voted to merge:
-            if not (my_policy == 'merge' and opp_policy == 'merge'):
-                raise
+            raise
 
         self.health_gained_this_round += my_inc
         opp.health_gained_this_round += opp_inc
         self.increment_health(my_inc)
         opp.increment_health(opp_inc)
 
-        for i in range(self.history_length - 1):
-            self.history[opp][i] = self.history[opp][i + 1]
-        self.history[opp][-1] = opp_policy
-
+        for i in range(self.memory_length - 1):
+            self.memory[opp][i] = self.memory[opp][i + 1]
+        self.memory[opp][-1] = opp_policy
         
-        for i in range(opp.history_length - 1):
-            opp.history[self][i] = opp.history[self][i + 1]
-        opp.history[self][-1] = my_policy
+        for i in range(opp.memory_length - 1):
+            opp.memory[self][i] = opp.memory[self][i + 1]
+        opp.memory[self][-1] = my_policy
 
         return (my_policy, my_inc, opp_policy, opp_inc)
 
@@ -395,7 +425,7 @@ class SuperAgent(Agent):
         self.health = 0
         self.health_gained_this_round = 0
         self.update_health()
-        self.history = {}
+        self.memory = {}
 
     def get_neighbors(self, force=False):
         all_neighbors = set.union(
@@ -483,21 +513,13 @@ class Animate:
 
         self.display_animation = display_animation
 
-        # self.graph, self.graph_ax = plt.subplots()
-        # x_ticks = np.linspace(0, x_max, cols + 1)
-        # y_ticks = np.linspace(0, y_max, rows + 1)
-        # ax.set_xticks(x_ticks)
-        # ax.set_yticks(y_ticks)
-        # ax.xaxis.grid(True)
-        # ax.yaxis.grid(True)
         self.ax.get_xaxis().set_visible(False)
         self.ax.get_yaxis().set_visible(False)
 
-        self.num_rounds = 10
+        Agent.reset()
         Agent.populate()
         self.agents = Agent.instances
         np.random.shuffle(self.agents)
-        self.current_round = 0
         self.current_agent_num = 0
         self.neighbors = list(
             self.agents[self.current_agent_num].get_neighbors())
@@ -509,13 +531,17 @@ class Animate:
         self.avg_scores = []
         self.min_scores = []
 
-        self.generations_to_plot = []
         self.path = ""
+        
+    def set_path(self, path):
+        self.path = path
+        # print("SET PATH: ", self.path)
 
     def init(self):
         # agents = Agent.instances
         # return self.patches
         pass
+
 
     def animate(self, step):
         # print(step)
@@ -526,12 +552,11 @@ class Animate:
         player1 = self.neighbors[self.current_neighbor_num]
         my_policy, inc0, opp_policy, inc1 = player0.play_against(player1)
 
-        num_rounds_to_track_phenotype = 3
         # TODO: Change when we introduce merging
-        if len(player0.phenotype_history) == (8 * num_rounds_to_track_phenotype):
-            player0.phenotype_history = player0.phenotype_history[8:]
+        if len(player0.phenotype_memory) == (8 * hp.NUM_ROUNDS_TO_TRACK_PHENOTYPE):
+            player0.phenotype_memory = player0.phenotype_memory[8:]
 
-        player0.phenotype_history.append(my_policy)
+        player0.phenotype_memory.append(my_policy)
         if self.display_animation:
             if my_policy == "merge":
                 fc = "yellow"
@@ -571,33 +596,38 @@ class Animate:
             self.current_neighbor_num = 0
             if self.current_agent_num == len(self.agents):
                 # New Round
-                print("Current round: ", self.current_round)
-                if Agent.should_calculate_individuality:
+                print("Current round: ", globals.CURRENT_ROUND)
+                if hp.SHOULD_CALCULATE_INDIVIDUALITY:
                     self.calculate_individuality()
-                    Agent.mutate_population()
-                if Agent.should_calculate_heterogeneity:
-                    if self.current_round % 1 == 0:
-                        Agent.calculate_heterogeneity()
 
-                max_history_length = 1 
-                min_history_length = Agent.max_history_length
-                history_lengths = []
+                if hp.SHOULD_CALCULATE_SINGLE_MEMORY_STRATEGIES:
+                    self.calculate_single_memory_info()
+
+                Agent.mutate_population() 
+
+                if hp.SHOULD_CALCULATE_HETEROGENEITY:
+                    # print("calculating heterogeneity")
+                    Agent.calculate_heterogeneity()
+
+                max_memory_length = 1 
+                min_memory_length = hp.MAX_MEMORY_LENGTH
+                memory_lengths = []
                 for a in Agent.instances:
                     a.health_data.append(a.health)
                     a.health_gained_this_round = 0
-                    if a.history_length > max_history_length:
-                        max_history_length = a.history_length
-                    if a.history_length < min_history_length:
-                        min_history_length = a.history_length
-                    history_lengths.append(a.history_length)
-                Agent.average_memory_length_per_round.append(np.average(history_lengths))
-                Agent.max_history_length_per_round.append(max_history_length)
-                Agent.min_history_length_per_round.append(min_history_length)
+                    if a.memory_length > max_memory_length:
+                        max_memory_length = a.memory_length
+                    if a.memory_length < min_memory_length:
+                        min_memory_length = a.memory_length
+                    memory_lengths.append(a.memory_length)
+                Agent.average_memory_length_per_round.append(np.average(memory_lengths))
+                Agent.max_memory_length_per_round.append(max_memory_length)
+                Agent.min_memory_length_per_round.append(min_memory_length)
 
-                if self.current_round in self.generations_to_plot:
+                if globals.CURRENT_ROUND in hp.GENERATIONS_TO_PLOT:
                     self.plot()
 
-                self.current_round += 1
+                globals.CURRENT_ROUND += 1
                 self.current_agent_num = 0
                 np.random.shuffle(self.agents)
 
@@ -626,22 +656,32 @@ class Animate:
         ax.grid(True)
         # ax.set_ylim([-1, 101])
         ax.legend(["Max Health", "Average Health", "Min Health"])
-        plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
-                    "Max_Min_Avg_Scores" + str(self.current_round)))
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "Max_Min_Avg_Scores" + str(globals.CURRENT_ROUND)))
         plt.clf()
 
     def plot_all_healths(self):
+        plt.clf()
+        self.ax.get_xaxis().set_visible(True)
+        self.ax.get_yaxis().set_visible(True)
+        
         for agent in Agent.instances:
+            # print(len(agent.health_data))
             plt.plot([y / (x + 1) for x, y in enumerate(agent.health_data)])
 
         ax = plt.gca()
         ax.set(xlabel='Round', ylabel='Health',
                title="Agent Health Throughout Simulation")
         ax.grid(True)
+        ax.set_xlim([0, len(agent.health_data) - 1])
         # ax.set_ylim([-1, 101])
+        print("PRINTING PATH: ", self.path)
         plt.savefig(os.path.join(self.path, "generation_" +
-                    str(self.current_round), "Individual_Scores" + str(self.current_round)))
+                    str(globals.CURRENT_ROUND), "Individual_Scores" + str(globals.CURRENT_ROUND)))
         plt.clf()
+        plt.cla()
+        plt.close('all')
+        
 
     def print_policy_tables(self):
         self.agents.sort(key=lambda x: x.health, reverse=True)
@@ -655,13 +695,14 @@ class Animate:
             print(i, ": ", entry)
 
     def plot_cooperability_ratio_graph(self):
+        print(Agent.cooperability_per_round)
         plt.plot(Agent.cooperability_per_round)
         ax = plt.gca()
         ax.set(xlabel="Round", ylabel="Cooperability Ratio",
                title="Cooperability Ratios Throughout Simulation")
         ax.grid(True)
-        plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
-                    "Cooperability_Ratio_Graph" + str(self.current_round)))
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "Cooperability_Ratio_Graph" + str(globals.CURRENT_ROUND)))
         # for i, entry in enumerate(Agent.cooperability_per_round):
         #     print(i, ": ", entry)
         plt.clf()
@@ -702,13 +743,16 @@ class Animate:
                 elif action == "c":
                     cooperate_counter += 1
 
-            p = Polygon(a.corners(), facecolor=cmap(
-                cooperate_counter / (cooperate_counter + defect_counter)), linewidth=0)
+            if cooperate_counter + defect_counter == 0:
+                p = Polygon(a.corners(), facecolor=cmap(0), linewidth=0)
+            else:
+                p = Polygon(a.corners(), facecolor=cmap(
+                    cooperate_counter / (cooperate_counter + defect_counter)), linewidth=0)
 
             self.ax.add_patch(p)
 
-        plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
-                    "Genotype_Color_Map" + str(self.current_round)))
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "Genotype_Color_Map" + str(globals.CURRENT_ROUND)))
         plt.clf()
 
     def phenotype_color_map(self, include_first_encounters=False):
@@ -732,7 +776,7 @@ class Animate:
         for a in Agent.instances:
             defect_counter = 0
             cooperate_counter = 0
-            for pt in a.phenotype_history:
+            for pt in a.phenotype_memory:
                 if pt == "c":
                     cooperate_counter += 1
                 elif pt == "d":
@@ -744,8 +788,8 @@ class Animate:
             self.ax.add_patch(p)
 
         # plt.show()
-        plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
-                    "Phenotype_Color_Map" + str(self.current_round)))
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "Phenotype_Color_Map" + str(globals.CURRENT_ROUND)))
         plt.clf()
 
     def phenotype_DBScan(self, include_first_encounters=False):
@@ -760,7 +804,7 @@ class Animate:
         for a in Agent.instances:
             defect_counter = 0
             cooperate_counter = 0
-            for pt in a.phenotype_history:
+            for pt in a.phenotype_memory:
                 if pt == "c":
                     cooperate_counter += 1
                 elif pt == "d":
@@ -780,7 +824,7 @@ class Animate:
         # print(min)
         # print(max)
 
-        clustering = DBSCAN(eps=1.05, min_samples=2).fit(data_points)
+        clustering = DBSCAN(eps=hp.PHENOTYPE_EPS, min_samples=hp.PHENOTYPE_MIN_SAMPLES).fit(data_points)
         colors = {-1: "black"}
         for i, a in enumerate(Agent.instances):
             label = clustering.labels_[i]
@@ -796,8 +840,8 @@ class Animate:
             self.ax.add_patch(p)
 
         # plt.show()
-        plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
-                    "Phenotype_DBScan_Color_Map" + str(self.current_round)))
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "Phenotype_DBScan_Color_Map" + str(globals.CURRENT_ROUND)))
         plt.clf()
 
 
@@ -833,8 +877,8 @@ class Animate:
             self.ax.add_patch(p)
 
         # plt.show()
-        plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
-                    "General_DBScan_Color_Map" + str(self.current_round)))
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "General_DBScan_Color_Map" + str(globals.CURRENT_ROUND)))
  
 
     def individuality_color_map(self, include_first_encounters=False):
@@ -877,13 +921,16 @@ class Animate:
                 elif action == "c":
                     cooperate_counter += 1
 
-            genotype_ratios.append(cooperate_counter /
-                                   (cooperate_counter + defect_counter))
+            if cooperate_counter + defect_counter == 0:
+                genotype_ratios.append(0)
+            else:
+                genotype_ratios.append(cooperate_counter /
+                                    (cooperate_counter + defect_counter))
 
         for i, a in enumerate(Agent.instances):
             defect_counter = 0
             cooperate_counter = 0
-            for pt in a.phenotype_history:
+            for pt in a.phenotype_memory:
                 if pt == "c":
                     cooperate_counter += 1
                 elif pt == "d":
@@ -895,14 +942,62 @@ class Animate:
                 abs(genotype_ratios[i] - phenotype_ratio)), linewidth=0)
 
             self.ax.add_patch(p)
-            x_text_position = np.mean([a.corners()[0][0], a.corners()[2][0]])
-            y_text_position = np.mean([a.corners()[0][1], a.corners()[1][1]])
-            self.ax.text(x_text_position, y_text_position, round(
-                abs(genotype_ratios[i] - phenotype_ratio), 3), fontsize=6)
+            # x_text_position = np.mean([a.corners()[0][0], a.corners()[2][0]])
+            # y_text_position = np.mean([a.corners()[0][1], a.corners()[1][1]])
+            # self.ax.text(x_text_position, y_text_position, round(
+            #     abs(genotype_ratios[i] - phenotype_ratio), 3), fontsize=6)
 
-        plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
-                    "Individuality_Color_Map" + str(self.current_round)))
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "Individuality_Color_Map" + str(globals.CURRENT_ROUND)))
         plt.clf()
+
+    def single_memory_color_map(self):
+        self.fig, self.ax = plt.subplots()
+        self.ax.set_xlim(0, x_max)
+        self.ax.set_ylim(0, y_max)
+
+        # self.graph, self.graph_ax = plt.subplots()
+        # x_ticks = np.linspace(0, x_max, cols + 1)
+        # y_ticks = np.linspace(0, y_max, rows + 1)
+        # ax.set_xticks(x_ticks)
+        # ax.set_yticks(y_ticks)
+        # ax.xaxis.grid(True)
+        # ax.yaxis.grid(True)
+        self.ax.get_xaxis().set_visible(False)
+        self.ax.get_yaxis().set_visible(False)
+        self.ax.set_title("Green=TfT, Red=AD, Yellow=AC, Blue=X")
+
+        for a in Agent.instances:
+            x_text_position = a.corners()[0][0]
+            y_text_position = np.mean([a.corners()[0][1], a.corners()[1][1]])
+
+            color = ""
+            if a.memory_length == 1:
+                try:
+                    if a.policy_table['c'] == 'c' and a.policy_table['d'] == 'd':
+                        info = "TfT"
+                        color = "green"
+                    elif a.policy_table['c'] == 'c' and a.policy_table['d'] == 'c':
+                        info = "AC"
+                        color = "yellow"
+                    elif a.policy_table['c'] == 'd' and a.policy_table['d'] == 'd':
+                        info = "AD"
+                        color = "red"
+                    elif a.policy_table['c'] == 'd' and a.policy_table['d'] == 'c':
+                        info = "X"
+                        color = "blue"
+                except:
+                    info += "N/a"
+            self.ax.text(x_text_position, y_text_position, info, fontsize=4)
+            p = Polygon(a.corners(), facecolor=color, linewidth=0)
+
+            self.ax.add_patch(p)
+
+        plt.savefig(os.path.join(self.path, "generation_" +
+                    str(globals.CURRENT_ROUND), "Single_Memory_Color_Map" + str(globals.CURRENT_ROUND)))
+        plt.clf()
+        plt.cla()
+        plt.close('all')
 
     def memory_color_map(self):
         self.fig, self.ax = plt.subplots()
@@ -926,8 +1021,8 @@ class Animate:
             x_text_position = a.corners()[0][0]
             y_text_position = np.mean([a.corners()[0][1], a.corners()[1][1]])
 
-            info = str(a.history_length)
-            if a.history_length == 1:
+            info = str(a.memory_length)
+            if a.memory_length == 1:
                 try:
                     if a.policy_table['c'] == 'c' and a.policy_table['d'] == 'd':
                         info += "-TfT"
@@ -941,13 +1036,15 @@ class Animate:
                     info += "N/a"
             self.ax.text(x_text_position, y_text_position, info, fontsize=4)
             p = Polygon(a.corners(), facecolor=cmap(
-                a.history_length / Agent.max_history_length), linewidth=0)
+                a.memory_length / hp.MAX_MEMORY_LENGTH), linewidth=0)
 
             self.ax.add_patch(p)
 
         plt.savefig(os.path.join(self.path, "generation_" +
-                    str(self.current_round), "Memory_Color_Map" + str(self.current_round)))
+                    str(globals.CURRENT_ROUND), "Memory_Color_Map" + str(globals.CURRENT_ROUND)))
         plt.clf()
+        plt.cla()
+        plt.close('all')
 
     def plot_relative_health(self):
         self.fig, self.ax = plt.subplots()
@@ -975,7 +1072,7 @@ class Animate:
             self.ax.add_patch(p)
 
         plt.savefig(os.path.join(self.path, "generation_" +
-                    str(self.current_round), "Relative_Health" + str(self.current_round)))
+                    str(globals.CURRENT_ROUND), "Relative_Health" + str(globals.CURRENT_ROUND)))
         plt.clf()
 
     def relative_health_DBScan(self):
@@ -992,7 +1089,7 @@ class Animate:
             data_points.append([a.row, a.col, rh])
 
         colors = {-1: [0,0,0]}
-        clustering = DBSCAN(eps=1.015, min_samples=2).fit(data_points)
+        clustering = DBSCAN(eps=hp.RELATIVE_HEALTH_EPS, min_samples=hp.RELATIVE_HEALTH_MIN_SAMPLES).fit(data_points)
 
         for i, a in enumerate(Agent.instances):
             label = clustering.labels_[i]
@@ -1008,8 +1105,8 @@ class Animate:
             self.ax.add_patch(p)
 
         # plt.show()
-        plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
-                    "Relative_Health_DBScan_Color_Map" + str(self.current_round)))
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "Relative_Health_DBScan_Color_Map" + str(globals.CURRENT_ROUND)))
         plt.clf()
 
     def plot_correlations(self, include_first_encounters=False):
@@ -1020,7 +1117,7 @@ class Animate:
         genotype_cooperability = []
 
         for a in Agent.instances:
-            memory_lengths.append(a.history_length)
+            memory_lengths.append(a.memory_length)
             success.append(a.health)
 
             genome = a.policy_table
@@ -1040,13 +1137,16 @@ class Animate:
                 elif action == "c":
                     g_cooperate_counter += 1
 
-            genotype_ratio = g_cooperate_counter / \
-                (g_cooperate_counter + g_defect_counter)
+            if g_cooperate_counter + g_defect_counter == 0:
+                genotype_ratio = 0
+            else:
+                genotype_ratio = g_cooperate_counter / \
+                    (g_cooperate_counter + g_defect_counter)
             genotype_cooperability.append(genotype_ratio)
 
             p_defect_counter = 0
             p_cooperate_counter = 0
-            for pt in a.phenotype_history:
+            for pt in a.phenotype_memory:
                 if pt == "c":
                     p_cooperate_counter += 1
                 elif pt == "d":
@@ -1089,15 +1189,15 @@ class Animate:
                              cmap='coolwarm', vmin=-1, vmax=1, mask=mask)
         # self.ax.set_yticks(y_ticks)
         self.ax.set_title("Correlation Matrix")
-        plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
-                    "Correlation_Matrix" + str(self.current_round)))
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "Correlation_Matrix" + str(globals.CURRENT_ROUND)))
         plt.clf()
 
     def individuality_plot(self):
         for hl, individuality_per_round_lists in Agent.individuality_per_round.items():
             averages = [np.average(sub_list) for sub_list in individuality_per_round_lists]
-            print(hl, averages)
-            plt.plot(averages, label="History length: " + str(hl))
+            # print(hl, averages)
+            plt.plot(averages, label="Memory length: " + str(hl))
 
         # plt.plot([1] * len(Agent.individuality_per_round))
 
@@ -1108,15 +1208,15 @@ class Animate:
         self.ax.grid(True)
         # self.ax.legend(["Population's Average Individuality", "Max"])
         self.ax.legend()
-        plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
-                    "Individuality Plot" + str(self.current_round)))
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "Individuality Plot" + str(globals.CURRENT_ROUND)))
         plt.clf()
         plt.close('all')
 
     def calculate_individuality(self, include_first_encounters=False):
-        individuality_by_history_length = {}
-        for i in range(1, Agent.max_history_length + 1):
-            individuality_by_history_length[i] = []
+        individuality_by_memory_length = {}
+        for i in range(1, Agent.max_memory_length + 1):
+            individuality_by_memory_length[i] = []
         unique_genomes = {}
         copied_agents = copy.deepcopy(Agent.instances)
         for a in copied_agents:
@@ -1145,7 +1245,7 @@ class Animate:
 
             p_defect_counter = 0
             p_cooperate_counter = 0
-            for pt in a.phenotype_history:
+            for pt in a.phenotype_memory:
                 if pt == "c":
                     p_cooperate_counter += 1
                 elif pt == "d":
@@ -1157,31 +1257,203 @@ class Animate:
             except:
                 continue
 
-            individuality_by_history_length[a.history_length].append(abs(genotype_ratio - phenotype_ratio))
+            individuality_by_memory_length[a.memory_length].append(abs(genotype_ratio - phenotype_ratio))
 
-        for i in range(1, Agent.max_history_length + 1):
-            Agent.individuality_per_round[i].append(individuality_by_history_length[i])
+        for i in range(1, Agent.max_memory_length + 1):
+            Agent.individuality_per_round[i].append(individuality_by_memory_length[i])
 
 
     def memory_lengths_over_time(self):
+        self.fig, self.ax = plt.subplots()
+        self.ax.set_xlim(auto=True)
+        self.ax.set_ylim(auto=True)
+        self.ax.get_xaxis().set_visible(True)
+        self.ax.get_yaxis().set_visible(True)
+        self.ax.grid(True)
+
         plt.plot(Agent.average_memory_length_per_round)
-        plt.plot(Agent.max_history_length_per_round)
-        plt.plot(Agent.min_history_length_per_round)
-        plt.plot([Agent.max_history_length] * len(Agent.max_history_length_per_round))
+        plt.plot(Agent.max_memory_length_per_round)
+        plt.plot(Agent.min_memory_length_per_round)
+        # plt.plot([hp.MAX_MEMORY_LENGTH] * len(Agent.max_memory_length_per_round))
 
         self.ax = plt.gca()
         self.ax.set_xlim(left=5)
-        self.ax.set(xlabel='Round', ylabel='History Length',
-                    title="Evolution of History Length")
-        self.ax.legend(["Average History Length Per Round", "Max History Length Per Round", "Min History Length Per Round", "History Length Cap"])
+        self.ax.set(xlabel='Round', ylabel='Memory Length',
+                    title="Evolution of Memory Length")
+        self.ax.legend(["Average Memory Length Per Round", "Max Memory Length Per Round", "Min Memory Length Per Round", "Memory Length Cap"])
         self.ax.grid(True)
-        plt.savefig(os.path.join(self.path, "generation_" + str(self.current_round),
-                    "History Length Plot" + str(self.current_round)))
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "Memory Length Plot" + str(globals.CURRENT_ROUND)))
+        plt.clf()
+        plt.close('all')
+
+    def single_memory_length_strategy_plot(self):
+        self.fig, self.ax = plt.subplots()
+        self.ax.set_xlim(auto=True)
+        self.ax.set_ylim(auto=True)
+        self.ax.get_xaxis().set_visible(True)
+        self.ax.get_yaxis().set_visible(True)
+        self.ax.grid(True)
+
+        TfT_counts = Agent.single_memory_strategy_info["TfT"]["counts"]
+        AC_counts = Agent.single_memory_strategy_info["AC"]["counts"]
+        AD_counts = Agent.single_memory_strategy_info["AD"]["counts"]
+        X_counts = Agent.single_memory_strategy_info["X"]["counts"]
+        total_pops = [sum([a, b, c, d]) for a, b, c, d in zip(TfT_counts, AC_counts, AD_counts, X_counts)]
+
+
+        plt.plot([100 * sub / tot for sub, tot in zip(TfT_counts, total_pops)])
+        plt.plot([100 * sub / tot for sub, tot in zip(AC_counts, total_pops)])
+        plt.plot([100 * sub / tot for sub, tot in zip(AD_counts, total_pops)])
+        plt.plot([100 * sub / tot for sub, tot in zip(X_counts, total_pops)])
+
+        self.ax = plt.gca()
+        self.ax.set_xlim(left=5)
+        self.ax.set(xlabel='Round', ylabel='% of agents with strategy',
+                    title="Different Single Memory Strategies")
+        self.ax.legend(["TfT", "Always Cooperate", "Always Defect", "Opposite of TfT"])
+        self.ax.grid(True)
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "single_memory_strategies_plot_" + str(globals.CURRENT_ROUND)))
         plt.clf()
         plt.close('all')
 
 
+    def plot_success_per_policy_for_one_memory(self):
+        self.fig, self.ax = plt.subplots()
+        self.ax.set_xlim(auto=True)
+        self.ax.set_ylim(auto=True)
+        self.ax.get_xaxis().set_visible(True)
+        self.ax.get_yaxis().set_visible(True)
+        self.ax.grid(True)
+
+        y1 = [sum(avg_scores) / max(1, counts) for avg_scores, counts in zip(Agent.single_memory_strategy_info["TfT"]["avg_scores"], Agent.single_memory_strategy_info["TfT"]["counts"])]
+        x1 = np.linspace(0, len(y1), len(y1))
+        std_1 = [np.std(ss) for ss in Agent.single_memory_strategy_info["TfT"]["avg_scores"]]
+        plt.fill_between(x1, [y - e for y, e in zip(y1, std_1)], [y + e for y, e in zip(y1, std_1)], alpha=0.2)
+        plt.plot(y1)
+       
+        y2 = [sum(avg_scores) / max(1, counts) for avg_scores, counts in zip(Agent.single_memory_strategy_info["AD"]["avg_scores"], Agent.single_memory_strategy_info["AD"]["counts"])]
+        x2 = np.linspace(0, len(y2), len(y2))
+        std_2 = [np.std(ss) for ss in Agent.single_memory_strategy_info["AD"]["avg_scores"]]
+        plt.fill_between(x2, [y - e for y, e in zip(y2, std_2)], [y + e for y, e in zip(y2, std_2)], alpha=0.2)
+        plt.plot(y2)
+
+        y3 = [sum(avg_scores) / max(1, counts) for avg_scores, counts in zip(Agent.single_memory_strategy_info["AC"]["avg_scores"], Agent.single_memory_strategy_info["AC"]["counts"])]
+        x3 = np.linspace(0, len(y3), len(y3))
+        std_3 = [np.std(ss) for ss in Agent.single_memory_strategy_info["AC"]["avg_scores"]]
+        plt.fill_between(x3, [y - e for y, e in zip(y3, std_3)], [y + e for y, e in zip(y3, std_3)], alpha=0.2)
+        plt.plot(y3)
+
+        y4 = [sum(avg_scores) / max(1, counts) for avg_scores, counts in zip(Agent.single_memory_strategy_info["X"]["avg_scores"], Agent.single_memory_strategy_info["X"]["counts"])]
+        x4 = np.linspace(0, len(y4), len(y4))
+        std_4 = [np.std(ss) for ss in Agent.single_memory_strategy_info["X"]["avg_scores"]]
+        plt.fill_between(x4, [y - e for y, e in zip(y4, std_4)], [y + e for y, e in zip(y4, std_4)], alpha=0.2)
+        plt.plot(y4)
+
+        self.ax = plt.gca()
+        self.ax.set_xlim(left=5)
+        self.ax.set(xlabel='Round', ylabel='Average Score',
+                    title="Average Success of Different Single Memory Strategies")
+        self.ax.legend(["TfT", "Always Cooperate", "Always Defect", "Opposite of TfT"])
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "success_per_policy_for_one_memory" + str(globals.CURRENT_ROUND)))
+        plt.clf()
+        plt.close('all')
+
+    def calculate_single_memory_info(self):
+        TfT_count = 0
+        AD_count = 0
+        AC_count = 0
+        X_count = 0
+
+        TfT_scores = []
+        AC_scores = []
+        AD_scores = []
+        X_scores = []
+
+
+        for a in Agent.instances:
+            try:
+                if a.policy_table['c'] == 'c' and a.policy_table['d'] == 'd':
+                    TfT_count += 1
+                    TfT_scores.append(a.health / (globals.CURRENT_ROUND + 1))
+                elif a.policy_table['c'] == 'c' and a.policy_table['d'] == 'c':
+                    AC_count += 1
+                    AC_scores.append(a.health / (globals.CURRENT_ROUND + 1))
+                elif a.policy_table['c'] == 'd' and a.policy_table['d'] == 'd':
+                    AD_count += 1
+                    AD_scores.append(a.health / (globals.CURRENT_ROUND + 1))
+                elif a.policy_table['c'] == 'd' and a.policy_table['d'] == 'c':
+                    X_count += 1
+                    X_scores.append(a.health / (globals.CURRENT_ROUND + 1))
+            except:
+                continue
+        
+        # print(TfT_score_sum / (max(1, TfT_count) * (globals.CURRENT_ROUND + 1)))
+        Agent.single_memory_strategy_info["TfT"]["counts"].append(TfT_count)
+        Agent.single_memory_strategy_info["AC"]["counts"].append(AC_count)
+        Agent.single_memory_strategy_info["AD"]["counts"].append(AD_count)
+        Agent.single_memory_strategy_info["X"]["counts"].append(X_count)
+        # print(TfT_score_sum, TfT_count)
+        Agent.single_memory_strategy_info["TfT"]["avg_scores"].append(TfT_scores)
+        Agent.single_memory_strategy_info["AC"]["avg_scores"].append(AC_scores)
+        Agent.single_memory_strategy_info["AD"]["avg_scores"].append(AD_scores)
+        Agent.single_memory_strategy_info["X"]["avg_scores"].append(X_scores)
+    
+    def memory_length_vs_health_histogram(self):
+        self.fig, self.ax = plt.subplots()
+        self.ax.set_xlim(auto=True)
+        self.ax.set_ylim(auto=True)
+        self.ax.get_xaxis().set_visible(True)
+        self.ax.get_yaxis().set_visible(True)
+        self.ax.grid(True)
+
+        highest_memory_length = 0
+        memory_length_to_average_health_map = {}
+        for a in Agent.instances:
+            highest_memory_length = max(highest_memory_length, a.memory_length) + 1
+            try:
+                memory_length_to_average_health_map[a.memory_length].append(a.health / (globals.CURRENT_ROUND + 1))
+            except:
+                memory_length_to_average_health_map[a.memory_length] = a.health / (globals.CURRENT_ROUND + 1)
+
+        
+        agent_counts_in_each_memory_length_bins = [0] * highest_memory_length
+        for a in Agent.instances:
+            agent_counts_in_each_memory_length_bins[a.memory_length] += 1
+        cmap = LinearSegmentedColormap.from_list(
+            'wb', ["white", "black"], N=highest_memory_length)
+        
+        memory_length_to_average_health_of_agents_in_corresponding_bin = {}
+        for mem_len, healths in memory_length_to_average_health_map.items():
+            memory_length_to_average_health_of_agents_in_corresponding_bin[mem_len] = np.mean(healths)
+        
+        y = [0] * (len(memory_length_to_average_health_of_agents_in_corresponding_bin) + 2)
+        for mem_len, avg_health in memory_length_to_average_health_of_agents_in_corresponding_bin.items():
+            y[mem_len] = avg_health
+
+        y = y[1:] # knock off memory of 0 which can't exist
+        x = range(1, len(y) + 1)
+
+        ax = sn.barplot(x=list(x), y=y, palette=cmap(agent_counts_in_each_memory_length_bins[1:]), dodge=False)
+        
+        # plt.bar(x, y, align='center')
+
+        self.ax.set(xlabel='Memory Length Bins', ylabel='Average Agent Health',
+                    title="Memory Length vs. Agent Health")
+        self.ax.grid(True)
+        plt.plot()
+        plt.savefig(os.path.join(self.path, "generation_" + str(globals.CURRENT_ROUND),
+                    "memory_length_vs_health_histogram_" + str(globals.CURRENT_ROUND)))
+        plt.clf()
+        plt.close('all')
+
     def plot(self):
+        # NOTE: This function will get overridden in experiments.py
+        #       so this function will only run if merging.py is the
+        #       file that got executed!
+
         self.plot_all_healths()
         # self.print_policy_tables()
         # self.print_heterogeneity_per_round()
@@ -1189,17 +1461,17 @@ class Animate:
         self.phenotype_color_map()
         self.individuality_color_map() # difference between genotype and phenotype
         self.memory_color_map()
+        self.single_memory_color_map()
         self.plot_relative_health()
         self.plot_max_min_avg()
         self.plot_correlations() # BUG: Fail to allocate bitmap issue has something to do with this or individuality plot
+        self.plot_success_per_policy_for_one_memory()
         
-        # Grouped:
-        # Agent.should_calculate_individuality = True
-        # self.individuality_plot()
+        # Make sure to turn on hp.should_calculate_individuality:
+        self.individuality_plot()
 
-        # Grouped:
-        # Agent.should_calculate_heterogeneity = True
-        # self.plot_cooperability_ratio_graph()
+        # Make sure to turn on hp.should_calculate_heterogeneity:
+        self.plot_cooperability_ratio_graph()
         
         self.phenotype_DBScan()
         self.relative_health_DBScan()
@@ -1229,13 +1501,17 @@ class Animate:
                                 avg_multi_agent_health]
                 print(new_DB_entry)
                 DB.append(new_DB_entry)
-                plt.close()
+                plt.close('all')
             else:
                 plt.show()
         else:
             for step in range(50000000):
                 self.animate(step)
                 step += 1
+                if globals.CURRENT_ROUND == hp.GENERATIONS_TO_PLOT[-1] + 1:
+                    plt.cla()
+                    plt.close('all')
+                    break
 
 
 if __name__ == '__main__':
@@ -1250,15 +1526,13 @@ if __name__ == '__main__':
     anim.path = "data_" + str(path_number) + "_" + str(date.today())
     os.makedirs(anim.path)
 
-    anim.generations_to_plot = [2, 50, 100, 150, 200,
-                                250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 800, 900, 1000, 1100, 1200, 1300, 2000, 3000, 4000, 5000]
-    for generation in anim.generations_to_plot:
+    for generation in hp.GENERATIONS_TO_PLOT:
         os.makedirs(os.path.join(anim.path, "generation_" + str(generation)))
 
     anim.run()
 
     os.makedirs(os.path.join(
-        anim.path, "generation_" + str(anim.current_round)))
+        anim.path, "generation_" + str(globals.CURRENT_ROUND)))
     anim.plot()  # will automatically plot at the end.
 
     # ob.disable()
