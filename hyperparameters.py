@@ -25,6 +25,11 @@ COOPERATE_AGAINST_DEFECT_POINTS = 0
 DEFECT_AGAINST_DEFECT_POINTS = 5
 DEFECT_AGAINST_COOPERATE_POINTS = 10
 
+# Merge related hyperparameters
+PERCENT_OF_MERGE_ACTIONS_IN_POLICY = .05 # % of the outputs in the policy table will be merged on average during initial generation and mutation. 
+
+MUTATION_STRATEGY = "incremental" # "incremental = anchored in previous policy, "complete" = rerolling the output without regard for previous
+
 # Data Acquisition
 GENERATIONS_TO_PLOT = [1, 5, 10] # the total # of rounds that will run is the last element
 NUM_ROUNDS_TO_TRACK_PHENOTYPE = 3
@@ -42,8 +47,6 @@ PHENOTYPE_EPS = 1.05
 PHENOTYPE_MIN_SAMPLES = 2
 RELATIVE_HEALTH_EPS = 1.015
 RELATIVE_HEALTH_MIN_SAMPLES = 2
-
-
 '''
 Original payoff matrix (for reference):
     COOPERATE_AGAINST_COOPERATE_POINTS = 8

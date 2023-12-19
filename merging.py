@@ -23,39 +23,27 @@ sys.setrecursionlimit(5000)
 
 plt.rcParams['animation.ffmpeg_path'] = 'C:\\Users\\pdsmi\\Desktop\\IPD\\ffmpeg-5.1.2-essentials_build\\bin\\ffmpeg.exe'
 
-# rows, cols = (30, 30)
-# rows, cols = (20, 20)
 rows, cols = (hp.ROWS, hp.COLS)
-# rows, cols = (10, 10)
-# rows, cols = (5, 5)
-# rows, cols = (3, 3)
 x_max, y_max = (500, 500)
-# R = 3
-# S = 0
-# T = 5
-# P = 1
-M = 0.0
-# The evolved values from "Multiagent Reinforcement Learning in the Iterated Prisoner's Dilemma: Fast Cooperation through Evolved Payoffs" are below:
-# R = 3.01
-# S = -44.05
-# T = 6.37
-# P = -41.04
-R = S = T = P = 1
 
 DB = []
 
-if M == S:
-    # To prevent confusion
-    raise
-
 # TODO: Read about cooperative game theory and social niche construction by Powers
 
-# Perhaps worth normalizing health in each step of the animation so we see who's doing better or worse relatively?
-
+def remove_first_encounters_from_memory(genome):
+    # Helper function that removes the first memory_length encounters for each opponent in each agent.
+    # This is because those memories are mostly random and likely won't provide meaningful data.
+    inputs_to_delete = []
+    for input in genome:
+        if '0' in input:
+            inputs_to_delete.append(input)
+    for input in inputs_to_delete:
+        del genome[input]
 
 class Agent(object):
-    # instances should only have sub-agents:
-    instances = []
+    instances = [] # A list of every agent in the game (does not include super agents, but does include their sub agents)
+
+    # Data collection
     heterogeneity_per_round = []
     cooperability_per_round = []
     average_memory_length_per_round = []
@@ -72,6 +60,8 @@ class Agent(object):
     @classmethod
     def reset(cls):
         Agent.instances = []
+
+        # Data collection
         Agent.heterogeneity_per_round = []
         Agent.cooperability_per_round = []
         Agent.average_memory_length_per_round = []
@@ -127,7 +117,7 @@ class Agent(object):
         return float(np.max(list(a.health for a in Agent.instances)))
 
     @classmethod
-    def calculate_heterogeneity(cls, include_first_encounters=False):
+    def calculate_heterogeneity_and_cooperability(cls, include_first_encounters=False):
         num_defects = 0
         num_cooperates = 0
 
@@ -136,219 +126,260 @@ class Agent(object):
         for a in copied_agents:
             sorted_genome = collections.OrderedDict(
                 sorted(a.policy_table.items()))
+            
+            # Clears out random initial first encounters that only happened once.
             if not include_first_encounters:
-                inputs_to_delete = []
-                for input in sorted_genome:
-                    if '0' in input:
-                        inputs_to_delete.append(input)
-                for input in inputs_to_delete:
-                    del sorted_genome[input]
+                remove_first_encounters_from_memory(sorted_genome)
+
+            # Records the number of unique genomes across the population.
             genome_string = json.dumps(sorted_genome)
             if genome_string in unique_genomes:
                 unique_genomes[genome_string] += 1
             else:
                 unique_genomes[genome_string] = 1
+
+            # Counts the number of cooperates and defects across the population.
             for action in sorted_genome.values():
                 if action == "d":
                     num_defects += 1
                 elif action == "c":
                     num_cooperates += 1
-
+                    
         Agent.heterogeneity_per_round.append(unique_genomes)
         if num_cooperates + num_defects == 0:
+            # protect against divide by 0 error.
             Agent.cooperability_per_round.append(0)
         else:
             Agent.cooperability_per_round.append(
                 num_cooperates / (num_cooperates + num_defects))
-    
 
     @classmethod
     def mutate_population(cls):
-        for a in Agent.instances:
-            lowest = True
-            for n in list(a.neighbors):
-                if a.health_gained_this_round > n.health_gained_this_round:
-                    lowest = False
+        already_viewed_super_agents = {}
+        for agent in Agent.instances:
+            # Decide if current agent is the worst agent in the neighborhood.
+            worst_performing_agent_in_neighborhood = True
+            for neighbor in list(agent.neighbors):
+                if agent.health_gained_this_round > neighbor.health_gained_this_round:
+                    worst_performing_agent_in_neighborhood = False
                     break
-            if lowest:
-                a.num_times_mutated_in_a_row += 1
-                if a.num_times_mutated_in_a_row == hp.NUM_TIMES_AGENT_MUTATED_IN_A_ROW_CAP:
-                    # print("GETTING COPIED")
-                    best_neighbor = a
-                    for n in list(a.neighbors):
-                        if n.health_gained_this_round > best_neighbor.health_gained_this_round:
-                            best_neighbor = n
-                    a.policy_table = copy.deepcopy(best_neighbor.policy_table)
-                    if a.memory_length > best_neighbor.memory_length:
-                        diff = a.memory_length - best_neighbor.memory_length
-                        for k, v in a.memory.items():
-                            a.memory[k] = v[diff:]
-                    elif a.memory_length < best_neighbor.memory_length:
-                        diff = best_neighbor.memory_length - a.memory_length
-                        for k, v in a.memory.items():
-                            a.memory[k] = diff * ['0'] + v
-                    a.memory_length = best_neighbor.memory_length
+
+            if worst_performing_agent_in_neighborhood:
+                # If an agent performs the worst of its neighbors NUM_TIMES_AGENT_MUTATED_IN_A_ROW_CAP times
+                # then it will just copy the genome of its most successful neighbor.
+                agent.num_times_mutated_in_a_row += 1
+                if agent.num_times_mutated_in_a_row == hp.NUM_TIMES_AGENT_MUTATED_IN_A_ROW_CAP:
+                    # Finds the best neighbor and copies its policy table
+                    best_neighbor = agent
+                    for neighbor in list(agent.neighbors):
+                        if neighbor.health_gained_this_round > best_neighbor.health_gained_this_round:
+                            best_neighbor = neighbor
+                    agent.policy_table = copy.deepcopy(best_neighbor.policy_table)
+                    # Adjust the memory length to match its new policy table
+                    agent.update_memory_length_to(best_neighbor.memory_length)
                 else:
-                    for key in a.policy_table.keys():
-                        if np.random.random() < hp.GENOME_MUTATION_RATE:  # mutation rate
-                            # print("MUTATING")
-                            a.policy_table[key] = np.random.choice(["d", "c"])
-                    if hp.MEMORY_LENGTH_CAN_EVOLVE:        
-                        memory_length_mutation = np.random.random()
-                        if memory_length_mutation <= hp.MEMORY_LENGTH_INCREASE_MUTATION_RATE:
-                            if a.memory_length < hp.MAX_MEMORY_LENGTH:
-                                # print("memory length increasing")
-                                for memory_list in a.memory.values():
-                                    memory_list.insert(0, '0') # insert unknown memory at the beginning
-                                
-                                a.memory_length += 1
-                                new_policy_table = {}
-                                for k, v in a.policy_table.items():
-                                    new_policy_table["c" + k] = v
-                                    new_policy_table["d" + k] = v
-                        elif memory_length_mutation <= hp.MEMORY_LENGTH_DECREASE_MUTATION_RATE + hp.MEMORY_LENGTH_INCREASE_MUTATION_RATE:
-                            if a.memory_length > 1:
-                                a.memory_length -= 1
-                                # print("memory length decreasing")
-                                new_policy_table = {}
-                                for k, v in a.policy_table.items():
-                                    new_key = k[1:]
-                                    if new_key in new_policy_table:
-                                        if new_policy_table[new_key] == v:
-                                            continue
-                                        else:
-                                            new_policy_table[new_key] = random.choice([v, new_policy_table[new_key]])
-                                    else:
-                                        new_policy_table[new_key] = v
+                    agent.mutate_policy_table()
+                    if hp.MEMORY_LENGTH_CAN_EVOLVE:
+                        # if the super agent hasn't been checked yet, maybe change its length
+                        if agent.super_agent and not already_viewed_super_agents[agent.super_agent]:
+                            agent.super_agent.maybe_mutate_memory_length()
+                        # if the agent is not part of a super agent, maybe change its length
+                        if not agent.super_agent:
+                            agent.maybe_mutate_memory_length()
             else:
-                a.num_times_mutated_in_a_row = 0
+                agent.num_times_mutated_in_a_row = 0
+            
+            # Keep track of which super agents we have seen so that we are not 
+            # repeatedly doing super agent targeted operations that should happen once.
+            if agent.super_agent:
+                already_viewed_super_agents[agent.super_agent] = True
  
     def __init__(self, row, col):
+        self.super_agent = None  # points to the agent's SuperAgent
 
-        self.super_agent = None
+        self.memory = {}  # key = agent ID, value = array of past moves
+        self.policy_table = {}  # key = memory (newest [left] -> oldest [right]), value = ("d" -> w1, "c" -> w2, "m" -> w3)
+        self.neighbors = set()
+        
+        self.health = 0
+        self.num_times_mutated_in_a_row = 0
+        self.memory_length = 0; self.set_memory_length()  # how many actions back an agent remembers of its opponents
+
         self.row = row
         self.col = col
-        self.policy_table = {}
-        self.neighbors = set()
-        self.health = 0
-        self.health_gained_this_round = 0
-        self.health_data = []
-        self.num_times_mutated_in_a_row = 0
-        self.memory = {}  # key = agent ID, value = array of past moves
-        self.phenotype_memory = []
 
+        # Data collection:
+        self.health_data = []
+        self.phenotype_memory = []
+        self.health_gained_this_round = 0
+
+       
+    def set_memory_length(self):
         self.memory_length = hp.STARTING_MEMORY_LENGTH
         if self.memory_length == -1:
+            # if STARTING_MEMORY_LENGTH is -1, then we set it randomly for each agent
             self.memory_length = np.random.randint(
                 1, hp.MAX_MEMORY_LENGTH + 1)
-            
+
     def get_neighbors(self, force=False):
         if self.super_agent and not force:
             return self.super_agent.get_neighbors()
         # Otherwise if no super-agent or force it:
         return self.neighbors
+    
+    def maybe_mutate_memory_length(self):     
+        # Randomly decides whether or not to increase or shrink memory length by one.
+        random_value = np.random.random()
+        if random_value <= hp.MEMORY_LENGTH_INCREASE_MUTATION_RATE and self.memory_length < hp.MAX_MEMORY_LENGTH:
+            self.grow_memory_by_one()
+        elif random_value <= hp.MEMORY_LENGTH_DECREASE_MUTATION_RATE + hp.MEMORY_LENGTH_INCREASE_MUTATION_RATE and self.memory_length > 1:
+            self.shrink_memory_by_one()
+    
+    def mutate(self):
+        for key in self.policy_table.keys():
+            if np.random.random() < hp.GENOME_MUTATION_RATE:
+                self.initialize_or_mutate_policy_output(key)
+    
+    def initialize_or_mutate_policy_output(self, policy_key):
+        # This path represents a complete re-randomization of action weights
+        if policy_key not in self.policy_table or hp.MUTATION_STRATEGY == "complete":
+            # Sets cooperate and defect probabilities based of merge probability hyperparameter 
+            remaining_probability = 1 - hp.PERCENT_OF_MERGE_ACTIONS_IN_POLICY
+            defect_probability = random.uniform(0, remaining_probability)
+            cooperate_probability = remaining_probability - defect_probability
+            if (sum([cooperate_probability, defect_probability, hp.PERCENT_OF_MERGE_ACTIONS_IN_POLICY]) != 1):
+                raise Exception("Action weights to not sum to 1 [complete]: Sum = ", sum([cooperate_probability, defect_probability, hp.PERCENT_OF_MERGE_ACTIONS_IN_POLICY]))
+            self.policy_table[policy_key] = {
+                "c": cooperate_probability,
+                "d": defect_probability,
+                "m": hp.PERCENT_OF_MERGE_ACTIONS_IN_POLICY,
+            }
+        # This path bases the change in weights off of the previous weights 
+        elif hp.MUTATION_STRATEGY == "incremental":
+            # Chooses random values to nudge each weight such that the sum of the nudges adds to zero
+            # which keeps the sum of the weights equal to 1.0
+            nudges = {'c': 0, 'd': 0, 'm': 0}
+            for action in nudges.keys():
+                nudges[action] = np.random.normal(.1, .1)
+            mean = np.mean(nudges.values())
+            for action in nudges.keys():
+                nudges[action] -= mean
 
-    def ranked_strategies(self, force=False):
-        if self.super_agent and not force:
-            return self.super_agent.ranked_strategies()
-        # Otherwise if no super-agent or force it
-        sw = self.strategy_weights.items()
-        ranked_strategies = []
-        while len(sw) > 0:
-            strategies, weights = zip(*sw)
-            choice = np.random.choice(strategies, p=weights)
-            ranked_strategies.append(choice)
-            sw = list(filter(lambda q: q[0] != choice, sw))
-            # Update weights to sum to 1:
-            total_weight = sum(q[-1] for q in sw)
-            new_sw = []
-            for q in sw:
-                new_sw.append((q[0], q[-1] / total_weight))
-            sw = new_sw
-        return ranked_strategies
+            for action in nudges.keys():
+                if nudges[action] + self.policy_table[policy_key][action] < 0:
+                    # retry if we are trying to shift the action weight below 0 
+                    return self.initialize_or_mutate_policy_output(policy_key)
+                else:
+                    self.policy_table[policy_key][action] += nudges[action]
+            if (sum(list(self.policy_table[policy_key].values())) != 1):
+                raise Exception("Action weights to not sum to 1 [incremental]: Sum = ", sum(list(self.policy_table[policy_key].values())))
+        else:
+            print("LOG(DEBUG): MUTATION_STRATEGY hyperparameter was not found: ", hp.MUTATION_STRATEGY)
 
-    def get_policy_output(self, opp_memory):
-        policy_key = "".join(opp_memory)
+    def get_policy_output(self, memory_of_opp):
+        policy_key = "".join(memory_of_opp)
         if policy_key not in self.policy_table:
-            self.policy_table[policy_key] = np.random.choice(["m", "c", "d"])
+            # If the agent has never seen this memory combination before, it will
+            # build an output for it and store it in its policy table
+            self.initialize_or_mutate_policy_output(policy_key)
 
-        return self.policy_table[policy_key]
+        # Queries the policy table with the memory of the current opponent and randomly chooses
+        # an action based on the associated weights
+        (actions, weights) = self.policy_table[policy_key].keys(), self.policy_table[policy_key].values()
+        return random.choice(list(actions), list(weights))
 
     def play_against(self, opp):
         # If both are part of super-agents
         if self.super_agent and opp.super_agent:
             # And both are part of the *same* super-agent, it's a bug
             if self.super_agent == opp.super_agent:
-                print("NOOOOO")
-                raise
+                raise Exception("Agents from the same super agent are playing against each other.")
             else:
                 return self.super_agent.play_against(opp.super_agent)
-        # If I'm part of a group and my opponent isn't:
+        # If I'm part of a super agent and my opponent isn't:
         elif self.super_agent and not opp.super_agent:
             return self.super_agent.play_against(opp)
-        # If my opponent is part of a group and I'm not:
+        # If my opponent is part of a super agent and I'm not:
         elif (not self.super_agent) and opp.super_agent:
             return self.play_against(opp.super_agent)
         # Else play as below:
 
+        # Sets up an empty memory of a never before seen opponent
         if opp not in self.memory:
             self.memory[opp] = ['0'] * self.memory_length
         if self not in opp.memory:
             opp.memory[self] = ['0'] * opp.memory_length
 
-        my_policy = self.get_policy_output(self.memory[opp])
-        opp_policy = opp.get_policy_output(opp.memory[self])
-        if my_policy == 'm' and opp_policy == 'm':
+        # Gets the action based on the memory of the current opponent
+        my_action = self.get_policy_output(self.memory[opp])
+        opp_action = opp.get_policy_output(opp.memory[self])
+
+        # Awards correct points based on the agents' actions
+        if my_action == 'm' and opp_action == 'm':
             my_inc = hp.MERGE_AGAINST_MERGE_POINTS
             opp_inc = hp.MERGE_AGAINST_MERGE_POINTS
             self.merge_with(opp)
-        elif my_policy == 'm' and opp_policy == 'c':
+        elif my_action == 'm' and opp_action == 'c':
             my_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
             opp_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
-        elif my_policy == 'c' and opp_policy == 'm':
+        elif my_action == 'c' and opp_action == 'm':
             my_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
             opp_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
-        elif my_policy == 'd' and opp_policy == 'm':
+        elif my_action == 'd' and opp_action == 'm':
             my_inc = hp.DEFECT_AGAINST_COOPERATE_POINTS
             opp_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
-        elif my_policy == 'm' and opp_policy == 'd':
+        elif my_action == 'm' and opp_action == 'd':
             my_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
             opp_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
-        elif my_policy == 'c' and opp_policy == 'c':
+        elif my_action == 'c' and opp_action == 'c':
             my_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
             opp_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
-        elif my_policy == 'c' and opp_policy == 'd':
+        elif my_action == 'c' and opp_action == 'd':
             my_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
             opp_inc = hp.DEFECT_AGAINST_COOPERATE_POINTS
-        elif my_policy == 'd' and opp_policy == 'c':
+        elif my_action == 'd' and opp_action == 'c':
             my_inc = hp.DEFECT_AGAINST_COOPERATE_POINTS
             opp_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
-        elif my_policy == 'd' and opp_policy == 'd':
+        elif my_action == 'd' and opp_action == 'd':
             my_inc = hp.DEFECT_AGAINST_DEFECT_POINTS
             opp_inc = hp.DEFECT_AGAINST_DEFECT_POINTS
         else:
-            raise
+            raise Exception("Unknown action taken by an agent.")
 
         self.health_gained_this_round += my_inc
         opp.health_gained_this_round += opp_inc
         self.increment_health(my_inc)
         opp.increment_health(opp_inc)
 
+        # Update memories based on opponents previous move
         for i in range(self.memory_length - 1):
             self.memory[opp][i] = self.memory[opp][i + 1]
-        self.memory[opp][-1] = opp_policy
+        self.memory[opp][-1] = opp_action
+
+        if type(self) == SuperAgent:
+            for sa in self.sub_agents:
+                for i in range(sa.memory_length - 1):
+                    self.memory[opp][i] = sa.memory[opp][i + 1]
+                sa.memory[opp][-1] = opp_action
         
         for i in range(opp.memory_length - 1):
             opp.memory[self][i] = opp.memory[self][i + 1]
-        opp.memory[self][-1] = my_policy
+        opp.memory[self][-1] = my_action
 
-        return (my_policy, my_inc, opp_policy, opp_inc)
+        if type(opp) == SuperAgent:
+            for sa in opp.sub_agents:
+                for i in range(sa.memory_length - 1):
+                    opp.memory[self][i] = sa.memory[self][i + 1]
+                sa.memory[self][-1] = my_action
+
+        return (my_action, my_inc, opp_action, opp_inc)
 
     def merge_with(self, opp):
         if type(opp) == SuperAgent:
             opp.merge_with(self)
         elif self.super_agent == None and opp.super_agent == None:
-            sa = SuperAgent(sub_agents=[self, opp])
+            # Creates a new super agent with two individual agents
+            SuperAgent(sub_agents=[self, opp])
         elif self.super_agent and opp.super_agent:
             self.super_agent.merge_with(opp.super_agent)
         elif self.super_agent and (not opp.super_agent):
@@ -356,11 +387,73 @@ class Agent(object):
         elif (not self.super_agent) and opp.super_agent:
             opp.super_agent.merge_with(self)
         else:
-            # This should never happen
-            raise
+            raise Exception("Merging not supported for this combination of agents.")
 
     def increment_health(self, inc):
         self.health += inc
+
+    def shrink_memory_by_one(self):
+        # Need at least a memory length of 1
+        if self.memory_length <= 1:
+            return
+        
+        self.memory_length -= 1
+        self.memory = self.memory[:-1]
+
+        # Cuts off the last memory of each opponent and sets that new memory
+        # equal to the average of the weights for the two memories that will conflict.
+        # Ex: D,M,D and D,M,C --[last memory removed]--> D,M and D,M (newly overlapping memories need to be merged)
+        new_policy_table = {}
+        for memory_string, action_weights in self.policy_table.items():
+            new_key = memory_string[:-1]
+            if new_key in new_policy_table:
+                averaged_weights = {}
+                for action, weight in new_policy_table[new_key].items():
+                    averaged_weights[action] = (weight + action_weights[action]) / 2
+                new_policy_table[new_key] = averaged_weights
+            else:
+                new_policy_table[new_key] = action_weights
+
+    def grow_memory_by_one(self):
+        if self.memory >= hp.MAX_MEMORY_LENGTH:
+            return
+
+        self.memory_length += 1
+        self.memory.append('0')
+
+        # The action weights for each memory combination get duplicated for each new
+        # (longer) memory input that gets created in the policy table. 
+        new_policy_table = {}
+        for memory_string, action_weights in self.policy_table.items():
+            new_policy_table[memory_string + "c"] = action_weights
+            new_policy_table[memory_string + "d"] = action_weights
+            new_policy_table[memory_string + "m"] = action_weights
+            new_policy_table[memory_string + "0"] = action_weights
+
+        self.policy_table = new_policy_table
+
+    def shrink_memory_by_n(self, n):
+        for _ in range(n):
+            self.shrink_memory_by_one()
+        
+    def grow_memory_by_n(self, n):
+        for _ in range(n):
+            self.grow_memory_by_one()
+
+    def update_memory_length_to(self, new_length):
+        if self.memory_length > new_length:
+            amount_to_shrink = self.memory_length - new_length
+            # Cut down the memory of each opponent
+            for opponent, history in self.memory.items():
+                self.memory[opponent] = history[:(0 - amount_to_shrink)]
+        elif self.memory_length < new_length:
+            amount_to_grow = new_length - self.memory_length
+            # Add '0's (AKA unknown interaction placeholders) to the back of the memory for each
+            # opponent. 
+            for opponent, history in self.memory.items():
+                self.memory[opponent] = history + (amount_to_grow * ['0'])
+
+        self.memory_length = new_length
 
     # Return the health of this agent on a scale from 0 (worst) to 1 (best)
     # relative to its peers
@@ -418,15 +511,79 @@ class SuperAgent(Agent):
     def __init__(self, sub_agents):
         self.super_agent = None
         if any(type(sa) == SuperAgent for sa in sub_agents):
-            raise
+            raise Exception("SuperAgent is a sub Agent of a SuperAgent")
         self.sub_agents = sub_agents
         for sa in sub_agents:
             sa.super_agent = self
         self.health = 0
         self.health_gained_this_round = 0
         self.update_health()
+        self.merge_memories()
         self.memory = {}
 
+        self.make_memories_equal_size()
+
+    # Forces all sub agents to have the the same memory length
+    def make_memories_equal_size(self):
+        average_memory_length = np.round(np.mean([sa.memory_length for sa in self.sub_agents]))
+
+        for agent in self.sub_agents:
+            if agent.memory_length < average_memory_length:
+                agent.grow_memory_by_n(average_memory_length - agent.memory_length)
+            elif agent.memory_length > average_memory_length:
+                agent.shrink_memory_by_n(agent.memory_length - average_memory_length)
+
+        if hp.DEV:
+            for agent in self.sub_agents:
+                if agent.memory_length != average_memory_length:
+                    raise Exception("Agent's memory length does not match the super agent's memory length")
+                if len(agent.policy_table[0]) != average_memory_length:
+                    raise Exception("Policy table's memory input does not match the agent's memory length")
+
+    # 
+    def merge_memories(self):
+        opponent_to_memories_map = {}
+        # Builds a map of {opponent -> list[memory1, memory2, ...]}
+        for sub_agent in self.sub_agents:
+            for (opponent, memory) in sub_agent.memory.items():
+                if opponent in opponent_to_memories_map:
+                    opponent_to_memories_map[opponent].append(memory)
+                else:
+                    opponent_to_memories_map[opponent] = list(memory)
+
+        # takes a list of memories and returns a single array with the most common action for each index
+        def get_most_common_action_per_memory_idx(memories):
+            condensed_memories = []
+            t = np.array(memories).transpose()
+            for row in t:
+                vals, counts = np.unique(row, return_counts=True)
+                most_common_actions = []
+                max_count = max(counts)
+                for (v, c) in zip(vals, counts):
+                    if c == max_count:
+                        most_common_actions.append(v)
+                condensed_memories.append(random.choice(most_common_actions))
+            return condensed_memories
+
+        self.memory = {}
+        # NOTE: If we want each sub agent to adopt this memory, we should loop through them and
+        # set their memories equal to the super agent's memory. 
+        for (opponent, redundant_memories) in opponent_to_memories_map.items():
+            self.memory[opponent] = get_most_common_action_per_memory_idx(redundant_memories)
+
+    # Get the policy output for each sub agent return the most common one.
+    def get_policy_output(self, memory_of_opp):
+        super_agent_policy = {
+            "m": 0,
+            "c": 0,
+            "d": 0
+        }
+        for sub_agent in self.sub_agents:
+            super_agent_policy[sub_agent.get_policy_output(memory_of_opp)] += 1
+
+        return max(super_agent_policy, key=super_agent_policy.get)
+
+    # Consolidates all of the neighbors for all of the sub agents.
     def get_neighbors(self, force=False):
         all_neighbors = set.union(
             *[sa.get_neighbors(force=True) for sa in self.sub_agents])
@@ -434,69 +591,54 @@ class SuperAgent(Agent):
         # Return all my neighbors that aren't in me:
         return all_neighbors - my_members
 
+    # Sets the SuperAgent's health to the average of all the sub agents' healths.
     def update_health(self):
         avg_health = np.mean([sa.health for sa in self.sub_agents])
         for sa in self.sub_agents:
             sa.health = avg_health
         self.health = avg_health
 
+    # Merges with other Agent or SuperAgent
     def merge_with(self, other):
         if isinstance(other, SuperAgent):
             self.sub_agents += other.sub_agents
             for osa in other.sub_agents:
                 osa.super_agent = self
             del (other)
-            self.update_health()
         elif isinstance(other, Agent):
             self.sub_agents.append(other)
             other.super_agent = self
-            self.update_health()
         else:
-            raise
+            raise Exception("Agent is of unknown type")
 
-    # TODO: Look at other algorithms that have been used for learning in
-    # iterated PD, e.g. for agents with memory look at The Evolution of
-    # Cooperation. Eventually it would be good to say, "what emerges resembles
-    # paper XYZ."
-    def ranked_strategies(self, force=False):
-        sub_strats = [sa.ranked_strategies(force=True)
-                      for sa in self.sub_agents]
-        ranked_strats = []
+        self.update_health()
+        self.make_memories_equal_size()
+        self.merge_memories()
 
-        # While there any ranked votes left to be counted:
-        while max([len(ss) for ss in sub_strats]) > 0:
-            # Compute the first choice votes:
-            first_choice_dict = {}
-            for ss in sub_strats:
-                first_choice = ss[0]
-                if first_choice in first_choice_dict:
-                    first_choice_dict[first_choice] += 1
-                else:
-                    first_choice_dict[first_choice] = 1
-
-            # Tally up the first choice votes:
-            max_first_choice_votes = max(first_choice_dict.values())
-            winners = []
-            for candidate in first_choice_dict.keys():
-                if first_choice_dict[candidate] == max_first_choice_votes:
-                    winners.append(candidate)
-            # In case there are tied winners:
-            winner = np.random.choice(winners)
-
-            # Put the winner next in the list
-            ranked_strats.append(winner)
-
-            # Remove the winner from the next round:
-            for ss in sub_strats:
-                if winner in ss:
-                    ss.remove(winner)
-
-        return ranked_strats
-
+    
     def increment_health(self, inc):
         divided_health = inc / len(self.sub_agents)
         for sa in self.sub_agents:
             sa.health += divided_health
+
+
+    def maybe_mutate_memory_length(self):     
+        # Randomly decides whether or not to increase or shrink memory length by one.
+        random_value = np.random.random()
+        direction = ""
+        if random_value <= hp.MEMORY_LENGTH_INCREASE_MUTATION_RATE:
+            direction = "grow"
+        elif random_value <= hp.MEMORY_LENGTH_DECREASE_MUTATION_RATE + hp.MEMORY_LENGTH_INCREASE_MUTATION_RATE:
+            direction = "shrink"
+        else:
+            return 
+
+        # Make the same memory length change to each sub_agent
+        for sub_agent in self.sub_agents:
+            if direction == "grow" and sub_agent.memory_length < hp.MAX_MEMORY_LENGTH:
+                sub_agent.grow_memory_by_one()
+            elif direction == "shrink" and sub_agent.memory_length > 1:
+                sub_agent.shrink_memory_by_one()
 
 
 class Animate:
@@ -607,7 +749,7 @@ class Animate:
 
                 if hp.SHOULD_CALCULATE_HETEROGENEITY:
                     # print("calculating heterogeneity")
-                    Agent.calculate_heterogeneity()
+                    Agent.calculate_heterogeneity_and_cooperability()
 
                 max_memory_length = 1 
                 min_memory_length = hp.MAX_MEMORY_LENGTH
@@ -728,12 +870,7 @@ class Animate:
         for a in Agent.instances:
             genome = a.policy_table
             if not include_first_encounters:
-                inputs_to_delete = []
-                for input in genome:
-                    if '0' in input:
-                        inputs_to_delete.append(input)
-                for input in inputs_to_delete:
-                    del genome[input]
+                remove_first_encounters_from_memory(genome)
 
             defect_counter = 0
             cooperate_counter = 0
@@ -906,12 +1043,7 @@ class Animate:
         for a in Agent.instances:
             genome = a.policy_table
             if not include_first_encounters:
-                inputs_to_delete = []
-                for input in genome:
-                    if '0' in input:
-                        inputs_to_delete.append(input)
-                for input in inputs_to_delete:
-                    del genome[input]
+                remove_first_encounters_from_memory(genome)
 
             defect_counter = 0
             cooperate_counter = 0
@@ -1122,12 +1254,7 @@ class Animate:
 
             genome = a.policy_table
             if not include_first_encounters:
-                inputs_to_delete = []
-                for input in genome:
-                    if '0' in input:
-                        inputs_to_delete.append(input)
-                for input in inputs_to_delete:
-                    del genome[input]
+                remove_first_encounters_from_memory(genome)
 
             g_defect_counter = 0
             g_cooperate_counter = 0
@@ -1222,12 +1349,7 @@ class Animate:
         for a in copied_agents:
             genome = a.policy_table
             if not include_first_encounters:
-                inputs_to_delete = []
-                for input in genome:
-                    if '0' in input:
-                        inputs_to_delete.append(input)
-                for input in inputs_to_delete:
-                    del genome[input]
+                remove_first_encounters_from_memory(genome)
 
             g_defect_counter = 0
             g_cooperate_counter = 0
