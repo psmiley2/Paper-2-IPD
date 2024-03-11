@@ -1,3 +1,6 @@
+import io
+from pstats import SortKey
+import pstats
 import random
 import sys
 from sklearn.cluster import DBSCAN
@@ -17,18 +20,18 @@ from matplotlib.colors import LinearSegmentedColormap
 import pandas as pd
 import hyperparameters as hp
 import globals
+import time
 
 
 sys.setrecursionlimit(5000)
 
 plt.rcParams['animation.ffmpeg_path'] = 'C:\\Users\\pdsmi\\Desktop\\IPD\\ffmpeg-5.1.2-essentials_build\\bin\\ffmpeg.exe'
 
-rows, cols = (hp.ROWS, hp.COLS)
+# rows, cols = (hp.ROWS, hp.COLS)
+rows, cols = (3, 3)
 x_max, y_max = (500, 500)
 
 DB = []
-
-# TODO: Read about cooperative game theory and social niche construction by Powers
 
 def remove_first_encounters_from_memory(genome):
     # Helper function that removes the first memory_length encounters for each opponent in each agent.
@@ -152,14 +155,41 @@ class Agent(object):
         else:
             Agent.cooperability_per_round.append(
                 num_cooperates / (num_cooperates + num_defects))
+            
+    @classmethod
+    def assert_all_agents_in_super_agent_have_same_memory_length(self):
+        super_agents = set()
+        for agent in Agent.instances:
+            if agent.super_agent is not None and agent.super_agent not in super_agents:
+                super_agents.add(agent.super_agent)
+
+        for super_agent in super_agents:
+            for sub_agent in super_agent.sub_agents:
+                for policy_input in list(sub_agent.policy_table.keys()):
+                    if len(policy_input) != super_agent.memory_length:
+                        raise Exception("Sub agent has a policy table with length != the super agent's memory length")
+        
+        for super_agent in super_agents:
+            for sub_agent in super_agent.sub_agents:
+                for opponent_past_actions in list(sub_agent.memory.values()):
+                    if len(opponent_past_actions) != sub_agent.memory_length:
+                        raise Exception("There exist an opponent for which the number of memories != sub_agent.memory_length")
+                    if len(opponent_past_actions) != super_agent.memory_length:
+                        raise Exception("There exist an opponent for which the number of memories != super_agent.memory_length")
 
     @classmethod
     def mutate_population(cls):
-        already_viewed_super_agents = {}
+        already_viewed_super_agents = set()
         for agent in Agent.instances:
+            if agent.super_agent is not None:
+                if agent.super_agent in already_viewed_super_agents:
+                    continue  # we have already checked this super agent
+                already_viewed_super_agents.add(agent.super_agent)
+                agent = agent.super_agent  # Temporarily setting the SuperAgent to the agent variable just for this loop iteration.
+
             # Decide if current agent is the worst agent in the neighborhood.
             worst_performing_agent_in_neighborhood = True
-            for neighbor in list(agent.neighbors):
+            for neighbor in list(agent.get_neighbors()):
                 if agent.health_gained_this_round > neighbor.health_gained_this_round:
                     worst_performing_agent_in_neighborhood = False
                     break
@@ -169,30 +199,22 @@ class Agent(object):
                 # then it will just copy the genome of its most successful neighbor.
                 agent.num_times_mutated_in_a_row += 1
                 if agent.num_times_mutated_in_a_row == hp.NUM_TIMES_AGENT_MUTATED_IN_A_ROW_CAP:
-                    # Finds the best neighbor and copies its policy table
+                    # Finds the best neighbor and copies it
                     best_neighbor = agent
-                    for neighbor in list(agent.neighbors):
+                    for neighbor in list(agent.get_neighbors()):
                         if neighbor.health_gained_this_round > best_neighbor.health_gained_this_round:
                             best_neighbor = neighbor
-                    agent.policy_table = copy.deepcopy(best_neighbor.policy_table)
-                    # Adjust the memory length to match its new policy table
+                    agent.copy_policy_table(best_neighbor)
+                    # Adjust the memory length to match its new policy table (keep original memory)
                     agent.update_memory_length_to(best_neighbor.memory_length)
+                    agent.copy_threshold(best_neighbor)
                 else:
                     agent.mutate_policy_table()
+                    agent.maybe_mutate_split_threshold()
                     if hp.MEMORY_LENGTH_CAN_EVOLVE:
-                        # if the super agent hasn't been checked yet, maybe change its length
-                        if agent.super_agent and not already_viewed_super_agents[agent.super_agent]:
-                            agent.super_agent.maybe_mutate_memory_length()
-                        # if the agent is not part of a super agent, maybe change its length
-                        if not agent.super_agent:
-                            agent.maybe_mutate_memory_length()
+                        agent.maybe_mutate_memory_length()
             else:
                 agent.num_times_mutated_in_a_row = 0
-            
-            # Keep track of which super agents we have seen so that we are not 
-            # repeatedly doing super agent targeted operations that should happen once.
-            if agent.super_agent:
-                already_viewed_super_agents[agent.super_agent] = True
  
     def __init__(self, row, col):
         self.super_agent = None  # points to the agent's SuperAgent
@@ -204,6 +226,7 @@ class Agent(object):
         self.health = 0
         self.num_times_mutated_in_a_row = 0
         self.memory_length = 0; self.set_memory_length()  # how many actions back an agent remembers of its opponents
+        self.split_threshold = 0; self.initialize_split_threshold()
 
         self.row = row
         self.col = col
@@ -213,6 +236,35 @@ class Agent(object):
         self.phenotype_memory = []
         self.health_gained_this_round = 0
 
+    # Updates health based on points gained or lost this round
+    # Get's overloaded for Super Agent
+    def update_health(self, points):
+        number_of_neighbors = len(self.get_neighbors())
+        if number_of_neighbors  == 0:
+            raise Exception("All agents have merged together. TODO: Trigger end state")
+
+        points_scaled_to_number_of_neighbors = points / number_of_neighbors
+        self.health_gained_this_round += points_scaled_to_number_of_neighbors
+        self.health += points_scaled_to_number_of_neighbors
+
+    # Updates the memory based on the action performed by the opponent this round
+    def update_memory(self, opponent, new_memory):
+        for i in range(self.memory_length - 1):
+            self.memory[opponent][i] = self.memory[opponent][i + 1]
+        self.memory[opponent][-1] = new_memory
+
+        if type(self) == SuperAgent:
+            for sub_agent in self.sub_agents:
+                sub_agent.memory = self.memory
+
+    def initialize_split_threshold(self):
+        # the lower threshold at which the agent will split from the super agent
+        # if its super agent's performance is in the threshold_percentage bottom
+        # percent of all of the agents in the simulation. 
+        threshold_percentage = np.random.normal(loc=0.25, scale = .1) # .25 is the center and .1 is the standard deviation. 
+        
+        # make sure that the percentage is in [0, 1]
+        return min(1, max(0, threshold_percentage))
        
     def set_memory_length(self):
         self.memory_length = hp.STARTING_MEMORY_LENGTH
@@ -224,22 +276,44 @@ class Agent(object):
     def get_neighbors(self, force=False):
         if self.super_agent and not force:
             return self.super_agent.get_neighbors()
+        
+        # self.neighbors stores the individual neighbors even if they are sub agents;
+        # return only unmerged or super agent neighbors. Not sub agents.
+        unique_neighbors = set()
+        for neighbor in self.neighbors:
+            if not neighbor.super_agent:
+                unique_neighbors.add(neighbor)
+            elif neighbor.super_agent not in unique_neighbors:
+                unique_neighbors.add(neighbor.super_agent)
+
         # Otherwise if no super-agent or force it:
-        return self.neighbors
+        return unique_neighbors
     
-    def maybe_mutate_memory_length(self):     
+    def maybe_mutate_memory_length(self): 
         # Randomly decides whether or not to increase or shrink memory length by one.
         random_value = np.random.random()
         if random_value <= hp.MEMORY_LENGTH_INCREASE_MUTATION_RATE and self.memory_length < hp.MAX_MEMORY_LENGTH:
-            self.grow_memory_by_one()
+            if self.memory_length < hp.MAX_MEMORY_LENGTH:
+                self.memory_length += 1
+                self.grow_memory_by_one()
+                self.grow_policy_keys_by_one()
         elif random_value <= hp.MEMORY_LENGTH_DECREASE_MUTATION_RATE + hp.MEMORY_LENGTH_INCREASE_MUTATION_RATE and self.memory_length > 1:
-            self.shrink_memory_by_one()
-    
-    def mutate(self):
+            if self.memory_length > 1:
+                self.memory_length -= 1
+                self.shrink_memory_by_one()
+                self.shrink_policy_keys_by_one()
+
+    def maybe_mutate_split_threshold(self):
+        random_value = np.random.random()
+        if random_value <= hp.SPLIT_THRESHOLD_MUTATION_RATE:
+            threshold_percentage_change = np.random.normal(loc=0.0, scale = .05) # 0.0 is the center and .05 is the standard deviation. 
+            self.split_threshold = min(1, max(0, self.split_threshold + threshold_percentage_change)) # make sure that the percentage is in [0, 1]
+
+    def mutate_policy_table(self):
         for key in self.policy_table.keys():
             if np.random.random() < hp.GENOME_MUTATION_RATE:
                 self.initialize_or_mutate_policy_output(key)
-    
+        
     def initialize_or_mutate_policy_output(self, policy_key):
         # This path represents a complete re-randomization of action weights
         if policy_key not in self.policy_table or hp.MUTATION_STRATEGY == "complete":
@@ -247,34 +321,46 @@ class Agent(object):
             remaining_probability = 1 - hp.PERCENT_OF_MERGE_ACTIONS_IN_POLICY
             defect_probability = random.uniform(0, remaining_probability)
             cooperate_probability = remaining_probability - defect_probability
-            if (sum([cooperate_probability, defect_probability, hp.PERCENT_OF_MERGE_ACTIONS_IN_POLICY]) != 1):
-                raise Exception("Action weights to not sum to 1 [complete]: Sum = ", sum([cooperate_probability, defect_probability, hp.PERCENT_OF_MERGE_ACTIONS_IN_POLICY]))
             self.policy_table[policy_key] = {
                 "c": cooperate_probability,
                 "d": defect_probability,
                 "m": hp.PERCENT_OF_MERGE_ACTIONS_IN_POLICY,
             }
+
+            if hp.DEBUG:
+                sum_of_weights = sum([cooperate_probability, defect_probability, hp.PERCENT_OF_MERGE_ACTIONS_IN_POLICY])
+                if (sum_of_weights < 0.99 or sum_of_weights > 1.01):
+                    raise Exception("Action weights do not sum to 1 [complete]: Sum = ", sum([cooperate_probability, defect_probability, hp.PERCENT_OF_MERGE_ACTIONS_IN_POLICY]))
+            
         # This path bases the change in weights off of the previous weights 
         elif hp.MUTATION_STRATEGY == "incremental":
             # Chooses random values to nudge each weight such that the sum of the nudges adds to zero
             # which keeps the sum of the weights equal to 1.0
-            nudges = {'c': 0, 'd': 0, 'm': 0}
-            for action in nudges.keys():
-                nudges[action] = np.random.normal(.1, .1)
-            mean = np.mean(nudges.values())
-            for action in nudges.keys():
-                nudges[action] -= mean
+            nudges = {'c': np.random.normal(0, .1), 'd': np.random.normal(0, .1), 'm': np.random.normal(0, .1)}
+            nudges_mean = np.mean(list(nudges.values()))
+            for action in list(nudges.keys()):
+                nudges[action] = nudges[action] - nudges_mean
 
-            for action in nudges.keys():
-                if nudges[action] + self.policy_table[policy_key][action] < 0:
-                    # retry if we are trying to shift the action weight below 0 
+            for action, nudge in nudges.items():
+                new_weight = nudge + self.policy_table[policy_key][action]
+                if new_weight < 0 or new_weight > 1:
+                    # If anything is outside of [0, 1], reroll the nudges and try again
                     return self.initialize_or_mutate_policy_output(policy_key)
-                else:
-                    self.policy_table[policy_key][action] += nudges[action]
-            if (sum(list(self.policy_table[policy_key].values())) != 1):
-                raise Exception("Action weights to not sum to 1 [incremental]: Sum = ", sum(list(self.policy_table[policy_key].values())))
+            
+            for action, nudge in nudges.items():
+                self.policy_table[policy_key][action] += nudge
+
+            if hp.DEBUG:
+                sum_of_nudges = sum(list(nudges.values()))
+                if (sum_of_nudges < -0.001 or sum_of_nudges > .001):
+                    raise Exception("Sum of nudges != 0: ", sum_of_nudges)
+
+                sum_of_new_weights = sum(list(self.policy_table[policy_key].values()))
+                if (sum_of_new_weights > 1.001 or sum_of_new_weights < .999):
+                    raise Exception("Sum of new weights != 1: ", sum_of_new_weights)
+
         else:
-            print("LOG(DEBUG): MUTATION_STRATEGY hyperparameter was not found: ", hp.MUTATION_STRATEGY)
+            raise Exception("Hyperparameter was not found. MUTATION_STRATEGY = ", hp.MUTATION_STRATEGY)
 
     def get_policy_output(self, memory_of_opp):
         policy_key = "".join(memory_of_opp)
@@ -286,13 +372,49 @@ class Agent(object):
         # Queries the policy table with the memory of the current opponent and randomly chooses
         # an action based on the associated weights
         (actions, weights) = self.policy_table[policy_key].keys(), self.policy_table[policy_key].values()
-        return random.choice(list(actions), list(weights))
+        return random.choices(list(actions), list(weights))[0]
+    
+    def copy_policy_table(self, other):
+        if type(other) == SuperAgent:
+            # Single cell copying a single cell
+            self.policy_table = other.consolidate_sub_agents_policies_into_one_policy_table()
+        else:
+            # Single cell copying a single cell
+            self.policy_table = copy.deepcopy(other.policy_table)
 
+    def copy_threshold(self, other):
+        if type(other) == SuperAgent:
+            # Single cell copying super agent
+            self.split_threshold = np.mean([sub_agent.split_threshold for sub_agent in other.sub_agents])
+        else:
+            # Single cell copying a single cell
+            self.split_threshold = other.split_threshold
+
+    def maybe_split(self):
+        if self.super_agent is None:
+            return
+        
+        if self.super_agent.health <= self.split_threshold:
+            # NOTE: Neighbors should get handled out of the box. So should rendering. 
+            #       But make sure to validate this.
+            self.num_times_mutated_in_a_row = 0
+            self.super_agent.sub_agents.remove(self)
+            self.super_agent.update_super_agent_health_from_sub_agents()
+            self.memory_length = self.super_agent.memory_length
+            new_memory = {}
+            for opp, history in self.super_agent.memory.items():
+                new_memory[opp] = copy.deepcopy(history)
+            self.memory = new_memory
+            self.super_agent = None
+            
     def play_against(self, opp):
+        # time.sleep(.25)
+        # print("sleeping")
+
         # If both are part of super-agents
         if self.super_agent and opp.super_agent:
             # And both are part of the *same* super-agent, it's a bug
-            if self.super_agent == opp.super_agent:
+            if self.super_agent == opp.super_agent: 
                 raise Exception("Agents from the same super agent are playing against each other.")
             else:
                 return self.super_agent.play_against(opp.super_agent)
@@ -316,63 +438,47 @@ class Agent(object):
 
         # Awards correct points based on the agents' actions
         if my_action == 'm' and opp_action == 'm':
-            my_inc = hp.MERGE_AGAINST_MERGE_POINTS
-            opp_inc = hp.MERGE_AGAINST_MERGE_POINTS
+            my_point_change = hp.MERGE_AGAINST_MERGE_POINTS
+            opp_point_change = hp.MERGE_AGAINST_MERGE_POINTS
             self.merge_with(opp)
         elif my_action == 'm' and opp_action == 'c':
-            my_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
-            opp_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
+            my_point_change = hp.COOPERATE_AGAINST_COOPERATE_POINTS
+            opp_point_change = hp.COOPERATE_AGAINST_COOPERATE_POINTS
         elif my_action == 'c' and opp_action == 'm':
-            my_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
-            opp_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
+            my_point_change = hp.COOPERATE_AGAINST_COOPERATE_POINTS
+            opp_point_change = hp.COOPERATE_AGAINST_COOPERATE_POINTS
         elif my_action == 'd' and opp_action == 'm':
-            my_inc = hp.DEFECT_AGAINST_COOPERATE_POINTS
-            opp_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
+            my_point_change = hp.DEFECT_AGAINST_COOPERATE_POINTS
+            opp_point_change = hp.COOPERATE_AGAINST_DEFECT_POINTS
         elif my_action == 'm' and opp_action == 'd':
-            my_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
-            opp_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
+            my_point_change = hp.COOPERATE_AGAINST_DEFECT_POINTS
+            opp_point_change = hp.COOPERATE_AGAINST_DEFECT_POINTS
         elif my_action == 'c' and opp_action == 'c':
-            my_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
-            opp_inc = hp.COOPERATE_AGAINST_COOPERATE_POINTS
+            my_point_change = hp.COOPERATE_AGAINST_COOPERATE_POINTS
+            opp_point_change = hp.COOPERATE_AGAINST_COOPERATE_POINTS
         elif my_action == 'c' and opp_action == 'd':
-            my_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
-            opp_inc = hp.DEFECT_AGAINST_COOPERATE_POINTS
+            my_point_change = hp.COOPERATE_AGAINST_DEFECT_POINTS
+            opp_point_change = hp.DEFECT_AGAINST_COOPERATE_POINTS
         elif my_action == 'd' and opp_action == 'c':
-            my_inc = hp.DEFECT_AGAINST_COOPERATE_POINTS
-            opp_inc = hp.COOPERATE_AGAINST_DEFECT_POINTS
+            my_point_change = hp.DEFECT_AGAINST_COOPERATE_POINTS
+            opp_point_change = hp.COOPERATE_AGAINST_DEFECT_POINTS
         elif my_action == 'd' and opp_action == 'd':
-            my_inc = hp.DEFECT_AGAINST_DEFECT_POINTS
-            opp_inc = hp.DEFECT_AGAINST_DEFECT_POINTS
+            my_point_change = hp.DEFECT_AGAINST_DEFECT_POINTS
+            opp_point_change = hp.DEFECT_AGAINST_DEFECT_POINTS
         else:
             raise Exception("Unknown action taken by an agent.")
 
-        self.health_gained_this_round += my_inc
-        opp.health_gained_this_round += opp_inc
-        self.increment_health(my_inc)
-        opp.increment_health(opp_inc)
+        # skip updating memory if just merged
+        if not (my_action == 'm' and opp_action == 'm'):
+            # Update memories based on other's action
+            self.update_memory(opp, opp_action)
+            opp.update_memory(self, my_action)
 
-        # Update memories based on opponents previous move
-        for i in range(self.memory_length - 1):
-            self.memory[opp][i] = self.memory[opp][i + 1]
-        self.memory[opp][-1] = opp_action
-
-        if type(self) == SuperAgent:
-            for sa in self.sub_agents:
-                for i in range(sa.memory_length - 1):
-                    self.memory[opp][i] = sa.memory[opp][i + 1]
-                sa.memory[opp][-1] = opp_action
+        # Add or subtract the change in points from that interaction
+        self.update_health(my_point_change)
+        opp.update_health(opp_point_change)
         
-        for i in range(opp.memory_length - 1):
-            opp.memory[self][i] = opp.memory[self][i + 1]
-        opp.memory[self][-1] = my_action
-
-        if type(opp) == SuperAgent:
-            for sa in opp.sub_agents:
-                for i in range(sa.memory_length - 1):
-                    opp.memory[self][i] = sa.memory[self][i + 1]
-                sa.memory[self][-1] = my_action
-
-        return (my_action, my_inc, opp_action, opp_inc)
+        return (my_action, opp_action)
 
     def merge_with(self, opp):
         if type(opp) == SuperAgent:
@@ -389,17 +495,11 @@ class Agent(object):
         else:
             raise Exception("Merging not supported for this combination of agents.")
 
-    def increment_health(self, inc):
-        self.health += inc
-
     def shrink_memory_by_one(self):
-        # Need at least a memory length of 1
-        if self.memory_length <= 1:
-            return
-        
-        self.memory_length -= 1
-        self.memory = self.memory[:-1]
-
+        for other in self.memory.keys():
+            self.memory[other] = self.memory[other][:-1]
+    
+    def shrink_policy_table_keys_by_one(self):
         # Cuts off the last memory of each opponent and sets that new memory
         # equal to the average of the weights for the two memories that will conflict.
         # Ex: D,M,D and D,M,C --[last memory removed]--> D,M and D,M (newly overlapping memories need to be merged)
@@ -414,13 +514,13 @@ class Agent(object):
             else:
                 new_policy_table[new_key] = action_weights
 
+        self.policy_table = new_policy_table
+
     def grow_memory_by_one(self):
-        if self.memory >= hp.MAX_MEMORY_LENGTH:
-            return
+        for other in self.memory.keys():
+            self.memory[other].append('0')
 
-        self.memory_length += 1
-        self.memory.append('0')
-
+    def grow_policy_table_keys_by_one(self):
         # The action weights for each memory combination get duplicated for each new
         # (longer) memory input that gets created in the policy table. 
         new_policy_table = {}
@@ -435,10 +535,18 @@ class Agent(object):
     def shrink_memory_by_n(self, n):
         for _ in range(n):
             self.shrink_memory_by_one()
+
+    def shrink_policy_keys_by_n(self, n):
+        for _ in range(n):
+            self.shrink_policy_keys_by_one()
         
     def grow_memory_by_n(self, n):
         for _ in range(n):
             self.grow_memory_by_one()
+
+    def grow_policy_keys_by_n(self, n):
+        for _ in range(n):
+            self.grow_policy_table_keys_by_one()
 
     def update_memory_length_to(self, new_length):
         if self.memory_length > new_length:
@@ -454,6 +562,11 @@ class Agent(object):
                 self.memory[opponent] = history + (amount_to_grow * ['0'])
 
         self.memory_length = new_length
+
+        if hp.DEBUG:
+            for opponent_past_actions in self.memory.values():
+                if len(opponent_past_actions) != self.memory_length:
+                    raise Exception("There exists an opponent for which self.memory[opponent] != self.memory_length")
 
     # Return the health of this agent on a scale from 0 (worst) to 1 (best)
     # relative to its peers
@@ -511,45 +624,70 @@ class SuperAgent(Agent):
     def __init__(self, sub_agents):
         self.super_agent = None
         if any(type(sa) == SuperAgent for sa in sub_agents):
-            raise Exception("SuperAgent is a sub Agent of a SuperAgent")
+            raise Exception("SuperAgent is a sub agent of a SuperAgent")
         self.sub_agents = sub_agents
         for sa in sub_agents:
             sa.super_agent = self
         self.health = 0
+        self.num_times_mutated_in_a_row = 0
         self.health_gained_this_round = 0
-        self.update_health()
-        self.merge_memories()
+        self.update_super_agent_health_from_sub_agents()
         self.memory = {}
+        self.memory_length = 0
 
-        self.make_memories_equal_size()
+        self.merge_memories()
 
     # Forces all sub agents to have the the same memory length
     def make_memories_equal_size(self):
-        average_memory_length = np.round(np.mean([sa.memory_length for sa in self.sub_agents]))
+        average_memory_length = int(np.round(np.mean([sa.memory_length for sa in self.sub_agents])))
+        self.memory_length = average_memory_length
 
-        for agent in self.sub_agents:
-            if agent.memory_length < average_memory_length:
-                agent.grow_memory_by_n(average_memory_length - agent.memory_length)
-            elif agent.memory_length > average_memory_length:
-                agent.shrink_memory_by_n(agent.memory_length - average_memory_length)
+        # Need to get the unique memories because many of them will be shallow copies of each other.
+        # No doing this would cause memory shrinks and grows to effect multiple sub agents at once.
+        # We point the sub agents' memories at the super agent's memory.
+        sub_agents_with_unique_memories = {}
+        for sub_agent in self.sub_agents:
+            if id(sub_agent.memory) not in sub_agents_with_unique_memories:
+                sub_agents_with_unique_memories[id(sub_agent.memory)] = sub_agent
 
-        if hp.DEV:
-            for agent in self.sub_agents:
-                if agent.memory_length != average_memory_length:
+        for sub_agent in list(sub_agents_with_unique_memories.values()):
+            if sub_agent.memory_length < average_memory_length:
+                sub_agent.grow_memory_by_n(average_memory_length - sub_agent.memory_length)
+            elif sub_agent.memory_length > average_memory_length:
+                sub_agent.shrink_memory_by_n(sub_agent.memory_length - average_memory_length)
+
+        for sub_agent in self.sub_agents:
+            if sub_agent.memory_length < average_memory_length:
+                sub_agent.grow_policy_keys_by_n(average_memory_length - sub_agent.memory_length)
+            elif sub_agent.memory_length > average_memory_length:
+                sub_agent.shrink_policy_keys_by_n(average_memory_length - sub_agent.memory_length)
+            sub_agent.memory_length = average_memory_length
+
+        if hp.DEBUG:
+            for sub_agent in self.sub_agents:
+                if sub_agent.memory_length != average_memory_length:
                     raise Exception("Agent's memory length does not match the super agent's memory length")
-                if len(agent.policy_table[0]) != average_memory_length:
-                    raise Exception("Policy table's memory input does not match the agent's memory length")
+                
+                for opponent_actions in self.memory.values():
+                    if len(opponent_actions) != self.memory_length:
+                        raise Exception("There exists an opponent for which the length of past actions is different from the super agent's memory length")
 
-    # 
+                for policy_input in list(sub_agent.policy_table.keys()):
+                    if len(policy_input) != average_memory_length:
+                        raise Exception("Policy table's memory input does not match the agent's memory length")
+
+    # Combines the memories of all sub agents
     def merge_memories(self):
+        self.make_memories_equal_size()
+    
         opponent_to_memories_map = {}
         # Builds a map of {opponent -> list[memory1, memory2, ...]}
         for sub_agent in self.sub_agents:
-            for (opponent, memory) in sub_agent.memory.items():
+            for (opponent, memory_of_opponent) in sub_agent.memory.items():
                 if opponent in opponent_to_memories_map:
-                    opponent_to_memories_map[opponent].append(memory)
+                    opponent_to_memories_map[opponent].append(memory_of_opponent)
                 else:
-                    opponent_to_memories_map[opponent] = list(memory)
+                    opponent_to_memories_map[opponent] = [memory_of_opponent]
 
         # takes a list of memories and returns a single array with the most common action for each index
         def get_most_common_action_per_memory_idx(memories):
@@ -571,6 +709,9 @@ class SuperAgent(Agent):
         for (opponent, redundant_memories) in opponent_to_memories_map.items():
             self.memory[opponent] = get_most_common_action_per_memory_idx(redundant_memories)
 
+        for sub_agent in self.sub_agents:
+            sub_agent.memory = self.memory  # Note that this is making a shallow copy
+
     # Get the policy output for each sub agent return the most common one.
     def get_policy_output(self, memory_of_opp):
         super_agent_policy = {
@@ -585,14 +726,20 @@ class SuperAgent(Agent):
 
     # Consolidates all of the neighbors for all of the sub agents.
     def get_neighbors(self, force=False):
-        all_neighbors = set.union(
-            *[sa.get_neighbors(force=True) for sa in self.sub_agents])
-        my_members = set(self.sub_agents)
-        # Return all my neighbors that aren't in me:
-        return all_neighbors - my_members
+        unique_neighbors = set()
+        for sub_agent in self.sub_agents:
+            for neighbor in sub_agent.neighbors:
+                if not neighbor.super_agent:
+                    # Add if it's a single celled agent
+                    unique_neighbors.add(neighbor)
+                elif neighbor.super_agent not in unique_neighbors and neighbor.super_agent is not self:
+                    # Add the super agent if it hasn't been added yet AND make sure that super agent isn't ourself.
+                    unique_neighbors.add(neighbor.super_agent)
+
+        return unique_neighbors
 
     # Sets the SuperAgent's health to the average of all the sub agents' healths.
-    def update_health(self):
+    def update_super_agent_health_from_sub_agents(self):
         avg_health = np.mean([sa.health for sa in self.sub_agents])
         for sa in self.sub_agents:
             sa.health = avg_health
@@ -611,16 +758,9 @@ class SuperAgent(Agent):
         else:
             raise Exception("Agent is of unknown type")
 
-        self.update_health()
-        self.make_memories_equal_size()
+        self.update_super_agent_health_from_sub_agents()
         self.merge_memories()
-
-    
-    def increment_health(self, inc):
-        divided_health = inc / len(self.sub_agents)
-        for sa in self.sub_agents:
-            sa.health += divided_health
-
+        
 
     def maybe_mutate_memory_length(self):     
         # Randomly decides whether or not to increase or shrink memory length by one.
@@ -636,14 +776,75 @@ class SuperAgent(Agent):
         # Make the same memory length change to each sub_agent
         for sub_agent in self.sub_agents:
             if direction == "grow" and sub_agent.memory_length < hp.MAX_MEMORY_LENGTH:
-                sub_agent.grow_memory_by_one()
+                if self.memory_length < hp.MAX_MEMORY_LENGTH:
+                    sub_agent.memory_length += 1
+                    sub_agent.grow_memory_by_one()
+                    sub_agent.grow_policy_keys_by_one()
             elif direction == "shrink" and sub_agent.memory_length > 1:
-                sub_agent.shrink_memory_by_one()
+                if self.memory_length > 1:
+                    sub_agent.memory_length -= 1
+                    sub_agent.shrink_memory_by_one()
+                    sub_agent.shrink_policy_keys_by_one()
 
+    def maybe_mutate_split_threshold(self):
+        for sub_agent in self.sub_agents:
+            sub_agent.maybe_mutate_split_threshold()
+
+    def mutate_policy_table(self):
+        for sub_agent in self.sub_agents:
+            sub_agent.mutate_policy_table()
+
+    # Returns a deep copied version of the super agent's policy table
+    def consolidate_sub_agents_policies_into_one_policy_table(self):
+        # Populate a map of all of the of the sub agents' weights for each policy input
+        policy_input_to_action_weight_lists_map = {} # Ex: {'cdmd' -> {m: [.2, .2, .1], c: [.3, .5, .2], d: [.5, .3, .7]...}, ...}
+        for sub_agent in self.sub_agents:
+            for policy_input, weight_map in sub_agent.policy_table.items():
+                if policy_input in policy_input_to_action_weight_lists_map:
+                    for w_key, w_val in weight_map.items():
+                        policy_input_to_action_weight_lists_map[policy_input][w_key].append(w_val)
+                else:
+                    for w_key, w_val in weight_map.items():
+                        policy_input_to_action_weight_lists_map[policy_input][w_key] = list(w_val)
+        
+        # Go through the filled map and average the weights
+        for policy_input, action_weight_lists in policy_input_to_action_weight_lists_map.items():
+            for w_key, w_val_list in action_weight_lists.items():
+                policy_input_to_action_weight_lists_map[policy_input][w_key] = np.mean(w_val_list)
+
+        if hp.DEBUG:
+            # Validate that the weights add up to 1 for each row of each sub_agents' policy table
+            for policy_input, averaged_action_weights_map in policy_input_to_action_weight_lists_map.items():
+                sum_of_weights = sum(averaged_action_weights_map.values())
+                if  sum_of_weights > 1.001 or sum_of_weights < 9.999:
+                    raise Exception("Consolidated table has at least one output where weights don't sum to 1")
+
+        return policy_input_to_action_weight_lists_map
+
+    def copy_policy_table(self, other):
+        if type(other) == SuperAgent:
+            # Super agent copying another super agent
+            other_super_agent_consolidated_policy_table = other.consolidate_sub_agents_policies_into_one_policy_table()
+            for sub_agent in self.sub_agents:
+                sub_agent.policy_table = other_super_agent_consolidated_policy_table
+        else:
+            # Super agent copying a single agent
+            for sub_agent in self.sub_agents:
+                sub_agent.policy_table = copy.deepcopy(other.policy_table)
+
+    def copy_threshold(self, other):
+        if type(other) == SuperAgent:
+            # Super agent copying super agent
+            mean_of_other_sub_agents_split_thresholds = np.mean([sub_agent.split_threshold for sub_agent in other.sub_agents])
+            for sub_agent in self.sub_agents:
+                sub_agent.split_threshold = np.random.normal(loc=mean_of_other_sub_agents_split_thresholds, scale = .15)
+        else:
+            # Super agent copying a single cell
+            for sub_agent in self.sub_agents:
+                sub_agent.split_threshold = np.random.normal(loc=other.split_threshold, scale = .15)
 
 class Animate:
     def __init__(self, display_animation):
-        # , num_rounds, agents, current_round, current_agent_num, current_neighbor_num, neighbors
         global R, S, T, P
         R = np.random.uniform(-100.0, 100.0)
         S = np.random.uniform(-100.0, 100.0)
@@ -660,13 +861,12 @@ class Animate:
 
         Agent.reset()
         Agent.populate()
-        self.agents = Agent.instances
-        np.random.shuffle(self.agents)
-        self.current_agent_num = 0
-        self.neighbors = list(
-            self.agents[self.current_agent_num].get_neighbors())
-        np.random.shuffle(self.neighbors)
-        self.current_neighbor_num = 0
+
+        self.players = []
+        self.current_player_idx = 0
+        self.current_opponent_idx = 0
+        self.already_played = set()
+
         self.patches = []
 
         self.max_scores = []
@@ -677,74 +877,106 @@ class Animate:
         
     def set_path(self, path):
         self.path = path
-        # print("SET PATH: ", self.path)
 
     def init(self):
         # agents = Agent.instances
         # return self.patches
         pass
 
+    def display_matchup_animation(self, player0, player1, my_policy, opp_policy):
+        if my_policy == "m":
+            fc = "yellow"
+        elif my_policy == "c":
+            fc = "green"
+        elif my_policy == "d":
+            fc = "red"
+        else:
+            raise Exception("Tried to animate unknown policy: ", my_policy)
+        p1 = Polygon(player0.corners(), facecolor=fc, linewidth=0)
+        self.patches.append(p1)
+
+        if opp_policy == "m":
+            fc = "yellow"
+        elif opp_policy == "c":
+            fc = "green"
+        elif opp_policy == "d":
+            fc = "red"
+        else:
+            raise Exception("Tried to animate unknown policy: ", opp_policy)
+
+        p2 = Polygon(player1.corners(), facecolor=fc, linewidth=0)
+        self.patches.append(p2)
+
+        for a in Agent.instances:
+            if a is not player0 and a is not player1:
+                rh = a.relative_health()
+                fc = [rh, rh, rh]
+                pg = Polygon(a.corners(), facecolor=fc, linewidth=0)
+                self.patches.append(pg)
+
+    def initialize_round(self):
+        # Only allow individual agents and super agents (no sub agents)
+        unique_players = set()
+        for agent in Agent.instances:
+            if agent.super_agent and agent.super_agent not in unique_players:
+                unique_players.add(agent.super_agent)
+            elif not agent.super_agent:
+                unique_players.add(agent)
+
+        # Decide the opponents for each player and shuffle them
+        for player in unique_players:
+            opponents = list(player.get_neighbors())
+            np.random.shuffle(opponents)
+            self.players.append((player, opponents))
+
+        # Shuffle the order in which the players go this round
+        np.random.shuffle(self.players)
 
     def animate(self, step):
-        # print(step)
         for p in self.ax.patches:
             p.remove()
 
-        player0 = self.agents[self.current_agent_num]
-        player1 = self.neighbors[self.current_neighbor_num]
-        my_policy, inc0, opp_policy, inc1 = player0.play_against(player1)
+        if self.current_player_idx == 0 and self.current_opponent_idx == 0:
+            self.initialize_round()
 
-        # TODO: Change when we introduce merging
-        if len(player0.phenotype_memory) == (8 * hp.NUM_ROUNDS_TO_TRACK_PHENOTYPE):
-            player0.phenotype_memory = player0.phenotype_memory[8:]
+        player, opponents = self.players[self.current_player_idx]
+        current_opponent = opponents[self.current_opponent_idx]
 
-        player0.phenotype_memory.append(my_policy)
-        if self.display_animation:
-            if my_policy == "merge":
-                fc = "yellow"
-            elif my_policy == "c":
-                fc = "green"
-            elif my_policy == "d":
-                fc = "red"
-            else:
-                fc = "purple"
-            p1 = Polygon(player0.corners(), facecolor=fc, linewidth=0)
-            self.patches.append(p1)
+        '''
+        case if there is a merge mid round and two of the sub agents were set to play against each other
+        or a super agent was set to play against an individual agent that is now part of it
+        '''
+        if not ((player.super_agent is not None and 
+                 current_opponent.super_agent is not None and 
+                 player.super_agent == current_opponent.super_agent)
+                or (type(player) == SuperAgent and current_opponent.super_agent == player)
+                or (type(current_opponent) == SuperAgent and player.super_agent == current_opponent)):
+            my_policy, opp_policy = player.play_against(current_opponent)
+            if self.display_animation:
+                self.display_matchup_animation(player, current_opponent, my_policy, opp_policy)
 
-            if opp_policy == "merge":
-                fc = "yellow"
-            elif opp_policy == "c":
-                fc = "green"
-            elif opp_policy == "d":
-                fc = "red"
-            else:
-                fc = "purple"
+        # if len(player0.phenotype_memory) == (len(self.current_neighbors) * hp.NUM_ROUNDS_TO_TRACK_PHENOTYPE):
+        #     player0.phenotype_memory = player0.phenotype_memory[len(self.current_neighbors):]
+        # player0.phenotype_memory.append(my_policy)
 
-            p2 = Polygon(player1.corners(), facecolor=fc, linewidth=0)
-            self.patches.append(p2)
+        
 
-            for a in Agent.instances:
-                if a is not player0 and a is not player1:
-                    rh = a.relative_health()
-                    fc = [rh, rh, rh]
-                    pg = Polygon(a.corners(), facecolor=fc, linewidth=0)
-                    self.patches.append(pg)
-
-        self.current_neighbor_num += 1
-
-        if self.current_neighbor_num == len(self.neighbors):
+        self.current_opponent_idx += 1
+        if self.current_opponent_idx == len(opponents):
             # New Agent
-            self.current_agent_num += 1
-            self.current_neighbor_num = 0
-            if self.current_agent_num == len(self.agents):
+            self.current_player_idx += 1
+            self.current_opponent_idx = 0
+            if self.current_player_idx == len(self.players):
                 # New Round
+                self.current_player_idx = 0
                 print("Current round: ", globals.CURRENT_ROUND)
                 if hp.SHOULD_CALCULATE_INDIVIDUALITY:
                     self.calculate_individuality()
 
-                if hp.SHOULD_CALCULATE_SINGLE_MEMORY_STRATEGIES:
-                    self.calculate_single_memory_info()
+                # if hp.SHOULD_CALCULATE_SINGLE_MEMORY_STRATEGIES:
+                #     self.calculate_single_memory_info()
 
+                Agent.assert_all_agents_in_super_agent_have_same_memory_length
                 Agent.mutate_population() 
 
                 if hp.SHOULD_CALCULATE_HETEROGENEITY:
@@ -755,6 +987,7 @@ class Animate:
                 min_memory_length = hp.MAX_MEMORY_LENGTH
                 memory_lengths = []
                 for a in Agent.instances:
+                    a.maybe_split()
                     a.health_data.append(a.health)
                     a.health_gained_this_round = 0
                     if a.memory_length > max_memory_length:
@@ -767,20 +1000,16 @@ class Animate:
                 Agent.min_memory_length_per_round.append(min_memory_length)
 
                 if globals.CURRENT_ROUND in hp.GENERATIONS_TO_PLOT:
-                    self.plot()
+                    pass
+                    # self.plot()
 
                 globals.CURRENT_ROUND += 1
                 self.current_agent_num = 0
-                np.random.shuffle(self.agents)
 
                 # Data collection at the end of each round
                 self.max_scores.append(Agent.best_health())
                 self.avg_scores.append(Agent.average_health())
                 self.min_scores.append(Agent.worst_health())
-
-            self.neighbors = list(
-                self.agents[self.current_agent_num].get_neighbors())
-            np.random.shuffle(self.neighbors)
 
         if self.display_animation:
             for p in self.patches:
@@ -1627,7 +1856,7 @@ class Animate:
             else:
                 plt.show()
         else:
-            for step in range(50000000):
+            for step in range(5000000000):
                 self.animate(step)
                 step += 1
                 if globals.CURRENT_ROUND == hp.GENERATIONS_TO_PLOT[-1] + 1:
@@ -1637,25 +1866,25 @@ class Animate:
 
 
 if __name__ == '__main__':
-    # ob = cProfile.Profile()
-    # ob.enable()
+    ob = cProfile.Profile()
+    ob.enable()
 
-    anim = Animate(display_animation=False)
+    anim = Animate(display_animation=True)
 
     path_number = 0
     while os.path.exists("data_" + str(path_number) + "_" + str(date.today())):
         path_number += 1
     anim.path = "data_" + str(path_number) + "_" + str(date.today())
-    os.makedirs(anim.path)
+    # os.makedirs(anim.path)
 
-    for generation in hp.GENERATIONS_TO_PLOT:
-        os.makedirs(os.path.join(anim.path, "generation_" + str(generation)))
+    # for generation in hp.GENERATIONS_TO_PLOT:
+    #     os.makedirs(os.path.join(anim.path, "generation_" + str(generation)))
 
     anim.run()
 
-    os.makedirs(os.path.join(
-        anim.path, "generation_" + str(globals.CURRENT_ROUND)))
-    anim.plot()  # will automatically plot at the end.
+    # os.makedirs(os.path.join(
+    #     anim.path, "generation_" + str(globals.CURRENT_ROUND)))
+    # anim.plot()  # will automatically plot at the end.
 
     # ob.disable()
     # sec = io.StringIO()
